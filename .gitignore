@@ -1,0 +1,23 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+libdeps/
+
+# Arduino IDE
+build/
+libraries/
+
+# VS Code
+.vscode/
+
+# Binaries & Temporary files
+*.bin
+*.elf
+*.o
+*.d
+.DS_Store
+Thumbs.db
+
+# Keep the releases folder binaries (manual override)
+!releases/*.bin
