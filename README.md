@@ -71,5 +71,11 @@ Desenvolvido por **Leandro Morais** na **Faculdade de Engenharia Agrícola (FEAG
 
 Este projeto está sob a licença **MIT** - veja o arquivo [LICENSE](LICENSE) para detalhes. O uso é livre para fins acadêmicos e de pesquisa, solicitando-se a citação da fonte original.
 
+## 📚 Como Citar
+
+Se você utilizar esta biblioteca em seu trabalho acadêmico ou profissional, utilize o botão **"Cite this repository"** na barra lateral direita do GitHub para obter a citação nos formatos APA ou BibTeX. Alternativamente, utilize:
+
+> Morais, L. (2026). iotFeagri: Biblioteca de Provisionamento e Telemetria para Ecossistema IoT FEAGRI (Versão 1.1.0) [Software]. Disponível em https://github.com/seu-usuario/iotFeagri
+
 ---
 *Dashboard de Monitoramento: [leandro144.feagri.unicamp.br](http://leandro144.feagri.unicamp.br)*

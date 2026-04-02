@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "Se você usar este software, por favor cite-o conforme abaixo."
+authors:
+- family-names: "Morais"
+  given-names: "Leandro"
+  affiliation: "Faculdade de Engenharia Agrícola (FEAGRI) - UNICAMP"
+title: "iotFeagri: Biblioteca de Provisionamento e Telemetria para Ecossistema IoT FEAGRI"
+version: 1.1.0
+date-released: 2026-04-02
+url: "https://github.com/seu-usuario/iotFeagri"
+keywords:
+  - iot
+  - esp32
+  - feagri
+  - unicamp
+  - telemetry
+  - captive-portal
+license: MIT
