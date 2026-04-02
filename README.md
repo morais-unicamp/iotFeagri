@@ -65,6 +65,12 @@ void loop() {
 
 ---
 
+## 🙋 Contribuição e Suporte
+
+Encontrou um bug ou tem uma sugestão de melhoria? 
+- Abra uma [**Issue**](https://github.com/morais-unicamp/iotFeagri/issues) detalhando o problema.
+- Contribuições via *Pull Requests* são muito bem-vindas!
+
 ## 🎓 Créditos e Licença
 
 Desenvolvido por **Leandro Morais** na **Faculdade de Engenharia Agrícola (FEAGRI) - UNICAMP**.
