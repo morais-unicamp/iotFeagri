@@ -86,4 +86,5 @@ Se você utilizar esta biblioteca em seu trabalho acadêmico ou profissional, ut
 > Morais, L. (2026). *iotFeagri: Biblioteca de Provisionamento e Telemetria para Ecossistema IoT FEAGRI* (Versão 1.1.0) [Software]. Disponível em https://github.com/morais-unicamp/iotFeagri
 
 ---
-*Dashboard de Monitoramento: [leandro144.feagri.unicamp.br](http://leandro144.feagri.unicamp.br)*
+*Dashboard de Monitoramento: [leandro144.feagri.unicamp.br](http://leandro144.feagri.unicamp.br)*  
+> ⚠️ **Nota de Acesso**: A dashboard é um recurso interno e está acessível apenas para computadores conectados à **rede cabeada** ou **VPN da UNICAMP**.
