@@ -20,7 +20,7 @@ typedef void (*CommandCallback)(String command, String target, JsonObject data);
 
 class IotFeagri {
 public:
-    IotFeagri(const char* ra_default = "");
+    IotFeagri(const char* user_default = "");
 
     // Inicializa carregando da NVS. Abre portal se falhar ou estiver vazio.
     void begin();
@@ -35,6 +35,9 @@ public:
     bool publish(const char* grandeur, float value);
     bool publish(const char* grandeur, int value);
     bool publish(const char* grandeur, String value);
+    bool publishStatus(const char* key, bool value);
+    bool publishStatus(const char* key, const char* value);
+    bool publishStatus(const char* key, String value);
 
     // Define a versão do firmware (importante para o OTA)
     void setFirmwareVersion(const char* version);
@@ -48,7 +51,7 @@ public:
 
 private:
     // Configurações
-    String _ra;
+    String _userId;
     String _mqttBroker;
     int _mqttPort;
     String _mqttUser;
@@ -61,6 +64,8 @@ private:
     String _fwVersion;
     String _topicPub;
     String _topicSub;
+    String _topicStatus;
+    String _topicFwCmd;
     String _topicFwStatus;
     String _topicRtcReq;
     String _topicRtcResp;
@@ -83,6 +88,7 @@ private:
     // Persistência
     void loadConfig();
     void saveConfig();
+    void setupIdentityAndTopics();
 
     // WiFi & Portal
     void connectWiFi();

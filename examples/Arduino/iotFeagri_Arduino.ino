@@ -1,9 +1,7 @@
 /*
- * PROJETO: iotFeagri_Arduino
- * 
- * Agora com Portal de Configuração!
- * No primeiro uso, conecte seu celular no AP "IOT_FEAGRI_XXXX"
- * e acesse 192.168.4.1 para configurar WiFi e MQTT.
+ * Exemplo simples para Arduino IDE.
+ * No primeiro uso, conecte o celular ao AP "IOT_FEAGRI_XXXX"
+ * e acesse 192.168.4.1 para configurar WiFi e acesso ao broker.
  */
 
 #include "iotFeagri.h"
@@ -11,36 +9,57 @@
 IotFeagri node;
 
 #ifndef LED_BUILTIN
-#define LED_BUILTIN 2 
+#if CONFIG_IDF_TARGET_ESP32C3
+#define LED_BUILTIN 8
+#else
+#define LED_BUILTIN 2
+#endif
 #endif
 
+static bool ledState = false;
+
+static void applyLedState(bool on) {
+  ledState = on;
+  digitalWrite(LED_BUILTIN, on ? HIGH : LOW);
+  node.publishStatus("led_builtin", on);
+}
+
 void setup() {
-  // Inicializa tudo. O Portal abrirá se os dados estiverem faltando.
+  pinMode(LED_BUILTIN, OUTPUT);
+  applyLedState(false);
+
+  // Inicializa tudo. O Portal abrira se os dados estiverem faltando.
   node.begin();
-  
-  // Versão do Firmware (visto na Dashboard)
   node.setFirmwareVersion("v1.1.0_Arduino");
 
-  // Ações para comandos recebidos
   node.onCommand([](String command, String target, JsonObject data) {
-    if (command == "ON") digitalWrite(LED_BUILTIN, HIGH);
-    else if (command == "OFF") digitalWrite(LED_BUILTIN, LOW);
-  });
+    (void)target;
+    (void)data;
 
-  pinMode(LED_BUILTIN, OUTPUT);
+    if (command == "ON" || command == "led_on") {
+      applyLedState(true);
+    } else if (command == "OFF" || command == "led_off") {
+      applyLedState(false);
+    } else if (command == "toggle_led") {
+      applyLedState(!ledState);
+    }
+  });
 }
 
 void loop() {
-  // Mantém a conexão ativa e processa o Portal/Heartbeat
+  // Mantem a conexao ativa e processa Portal, MQTT, OTA e heartbeat.
   node.loop();
 
-  // Exemplo de envio de dado a cada 10 segundos
+  // Publica uma temperatura fake a cada 10 segundos.
   static unsigned long lastUpdate = 0;
   if (millis() - lastUpdate > 10000) {
     lastUpdate = millis();
     float valorSorteado = 20.0 + (random(0, 100) / 10.0);
-    node.publish("Sensor_Arduino", valorSorteado);
-    Serial.print("Dado enviado: ");
-    Serial.println(valorSorteado);
+    node.publish("temperature", valorSorteado);
+    node.publishStatus("led_builtin", ledState);
+    Serial.print("Dados enviados: ");
+    Serial.print(valorSorteado);
+    Serial.print(" C | LED=");
+    Serial.println(ledState ? "ON" : "OFF");
   }
 }

@@ -2,7 +2,7 @@
 
 // Namespace e Chaves NVS
 #define PREF_NAME "iot-feagri"
-#define KEY_RA "ra"
+#define KEY_USER "user"
 #define KEY_WIFI_PASS "w_pass"
 #define KEY_MQTT_HOST "m_host"
 #define KEY_MQTT_PORT "m_port"
@@ -13,7 +13,7 @@
 
 IotFeagri* _instance = nullptr;
 
-IotFeagri::IotFeagri(const char* ra_default) : _ra(ra_default), _mqttClient(_espClient) {
+IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttClient(_espClient) {
     _instance = this;
     _lastReconnectAttempt = 0;
     _lastMetricsTime = 0;
@@ -27,10 +27,25 @@ IotFeagri::IotFeagri(const char* ra_default) : _ra(ra_default), _mqttClient(_esp
     _useTls = false;
 }
 
+void IotFeagri::setupIdentityAndTopics() {
+    uint64_t chipId = ESP.getEfuseMac();
+    char cid[20];
+    sprintf(cid, "%04X%08X", (uint16_t)(chipId >> 32), (uint32_t)chipId);
+    _deviceId = _userId + "_" + String(cid).substring(8);
+
+    _topicPub = "feagri/" + _userId + "/devices/" + _deviceId + "/data";
+    _topicSub = "feagri/" + _userId + "/devices/" + _deviceId + "/cmd";
+    _topicStatus = "feagri/" + _userId + "/devices/" + _deviceId + "/status";
+    _topicFwCmd = "feagri/firmware/update/cmd";
+    _topicFwStatus = "feagri/firmware/update/status";
+    _topicRtcReq = "feagri/rtc/requisicao";
+    _topicRtcResp = "feagri/rtc/resposta";
+}
+
 void IotFeagri::loadConfig() {
     Preferences prefs;
     prefs.begin(PREF_NAME, true);
-    _ra = prefs.getString(KEY_RA, _ra);
+    _userId = prefs.getString(KEY_USER, _userId);
     _wifiPass = prefs.getString(KEY_WIFI_PASS, "");
     _mqttBroker = prefs.getString(KEY_MQTT_HOST, "leandro144.feagri.unicamp.br");
     _mqttPort = prefs.getInt(KEY_MQTT_PORT, 1883);
@@ -44,7 +59,7 @@ void IotFeagri::loadConfig() {
 void IotFeagri::saveConfig() {
     Preferences prefs;
     prefs.begin(PREF_NAME, false);
-    prefs.putString(KEY_RA, _ra);
+    prefs.putString(KEY_USER, _userId);
     prefs.putString(KEY_WIFI_PASS, _wifiPass);
     prefs.putString(KEY_MQTT_HOST, _mqttBroker);
     prefs.putInt(KEY_MQTT_PORT, _mqttPort);
@@ -61,7 +76,7 @@ void IotFeagri::begin() {
     loadConfig();
 
     // Se não tiver RA ou Senha WiFi salvas, entra em modo portal
-    if (_ra.length() == 0 || _wifiPass.length() == 0) {
+    if (_userId.length() == 0 || _wifiPass.length() == 0) {
         Serial.println(">> Configuracao incompleta. Iniciando Portal...");
         startPortal();
         return;
@@ -70,18 +85,7 @@ void IotFeagri::begin() {
     // Baseline de tempo
     configTime(0, 0, "pool.ntp.org", "time.google.com");
     
-    // Gerar Device ID baseado no MAC
-    uint64_t chipId = ESP.getEfuseMac();
-    char cid[20];
-    sprintf(cid, "%04X%08X", (uint16_t)(chipId >> 32), (uint32_t)chipId);
-    _deviceId = _ra + "_" + String(cid).substring(8);
-    
-    // Configurar Tópicos
-    _topicPub = "feagri/" + _ra + "/devices/" + _deviceId + "/telemetry";
-    _topicSub = "feagri/" + _ra + "/devices/" + _deviceId + "/cmd";
-    _topicFwStatus = "feagri/firmware/update/status";
-    _topicRtcReq = "feagri/rtc/requisicao";
-    _topicRtcResp = "feagri/rtc/resposta";
+    setupIdentityAndTopics();
 
     connectWiFi();
     
@@ -92,26 +96,20 @@ void IotFeagri::begin() {
 }
 
 void IotFeagri::begin(const char* mqtt_broker, int mqtt_port, const char* mqtt_user, const char* mqtt_pass) {
+    loadConfig();
     _mqttBroker = mqtt_broker;
     _mqttPort = mqtt_port;
     _mqttUser = mqtt_user;
     _mqttPass = mqtt_pass;
-    _ra = mqtt_user; // Assume RA as user in manual mode
-    _wifiPass = ""; 
+    if (_userId.length() == 0) {
+        _userId = mqtt_user;
+    }
 
     // Pula o portal e força conexão manual
     Serial.begin(115200);
-    
-    uint64_t chipId = ESP.getEfuseMac();
-    char cid[20];
-    sprintf(cid, "%04X%08X", (uint16_t)(chipId >> 32), (uint32_t)chipId);
-    _deviceId = _ra + "_" + String(cid).substring(8);
-    
-    _topicPub = "feagri/" + _ra + "/devices/" + _deviceId + "/telemetry";
-    _topicSub = "feagri/" + _ra + "/devices/" + _deviceId + "/cmd";
-    _topicFwStatus = "feagri/firmware/update/status";
-    _topicRtcReq = "feagri/rtc/requisicao";
-    _topicRtcResp = "feagri/rtc/resposta";
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
+
+    setupIdentityAndTopics();
 
     connectWiFi();
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
@@ -147,6 +145,7 @@ bool IotFeagri::connectMQTT() {
     if (_mqttClient.connect(_deviceId.c_str(), _mqttUser.c_str(), _mqttPass.c_str())) {
         Serial.println("OK");
         _mqttClient.subscribe(_topicSub.c_str());
+        _mqttClient.subscribe(_topicFwCmd.c_str());
         _mqttClient.subscribe(_topicRtcResp.c_str()); 
         publishFwStatus("boot", "online");
         requestTimeSync(); 
@@ -215,18 +214,19 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
 
     const char* type = doc["type"];
     const char* cmd = doc["command"];
-    const char* target = doc["target_id"];
+    const char* target = doc["target_id"] | doc["target"] | "";
 
     // Security Check: Target ID match or "todos"
-    if (target && String(target) != _deviceId && String(target) != "todos") {
+    if (strlen(target) > 0 && String(target) != _deviceId && String(target) != "todos") {
         return;
     }
 
     if (String(type) == "COMMAND") {
-        if (String(cmd) == "UPDATE") {
+        String command = cmd ? String(cmd) : "";
+        if (command == "UPDATE" || command == "update_firmware" || command == "trigger_update") {
             performUpdate();
         } else if (_userCallback) {
-            _userCallback(String(cmd), String(target), doc["data"].as<JsonObject>());
+            _userCallback(command, String(target), doc["data"].as<JsonObject>());
         }
     }
 }
@@ -259,6 +259,26 @@ bool IotFeagri::publish(const char* grandeur, String value) {
     return _mqttClient.publish(_topicPub.c_str(), jsonStr.c_str());
 }
 
+bool IotFeagri::publishStatus(const char* key, bool value) {
+    return publishStatus(key, value ? "on" : "off");
+}
+
+bool IotFeagri::publishStatus(const char* key, const char* value) {
+    return publishStatus(key, String(value));
+}
+
+bool IotFeagri::publishStatus(const char* key, String value) {
+    JsonDocument doc;
+    doc["type"] = "STATUS";
+    doc["client_id"] = _deviceId;
+    JsonObject data = doc["data"].to<JsonObject>();
+    data[key] = value;
+
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+    return _mqttClient.publish(_topicStatus.c_str(), jsonStr.c_str());
+}
+
 void IotFeagri::setFirmwareVersion(const char* version) {
     _fwVersion = version;
 }
@@ -270,12 +290,12 @@ void IotFeagri::onCommand(CommandCallback callback) {
 void IotFeagri::sendHeartbeat() {
     if (!_mqttClient.connected()) return;
 
-    String hbTopic = String("feagri/") + _ra + "/devices/" + _deviceId + "/heartbeat";
+    String hbTopic = String("feagri/") + _userId + "/devices/" + _deviceId + "/heartbeat";
     
     JsonDocument doc;
     doc["type"] = "heartbeat";
     doc["client_id"] = _deviceId;
-    doc["owner"] = _ra;
+    doc["owner"] = _userId;
     doc["fw_version"] = _fwVersion;
     doc["ip"] = WiFi.localIP().toString();
     doc["rssi"] = WiFi.RSSI();
@@ -323,7 +343,12 @@ void IotFeagri::performUpdate() {
     String host = _fwServer.length() > 0 ? _fwServer : _mqttBroker;
     String proto = _useTls ? "https://" : "http://";
     String baseUrl = proto + host;
-    String manifestUrl = baseUrl + "/static/firmware/generic_esp32/manifest.json";
+#if CONFIG_IDF_TARGET_ESP32C3
+    const char* fwChannel = "generic_esp32c3";
+#else
+    const char* fwChannel = "generic_esp32";
+#endif
+    String manifestUrl = baseUrl + "/static/firmware/" + fwChannel + "/manifest.json";
 
     HTTPClient http;
     http.begin(manifestUrl);
@@ -334,7 +359,7 @@ void IotFeagri::performUpdate() {
         JsonDocument doc;
         deserializeJson(doc, payload);
         
-        String defaultFwUrl = baseUrl + "/static/firmware/generic_esp32/firmware.bin";
+        String defaultFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/firmware.bin";
         String fwUrl = doc["url"] | defaultFwUrl;
         String md5 = doc["md5"] | "";
 
@@ -416,7 +441,7 @@ void IotFeagri::handleRoot() {
     p += "<div class='section'>Credenciais MQTT</div>";
     p += "<label>Host Broker</label><input name='m_host' type='text' value='" + _mqttBroker + "'>";
     p += "<label>Porta</label><input name='m_port' type='number' value='" + String(_mqttPort) + "'>";
-    p += "<label>Usuário (RA ou Login)</label><input name='m_user' type='text' placeholder='Ex: ra123456' value='" + _ra + "'>";
+    p += "<label>Usuário MQTT</label><input name='m_user' type='text' placeholder='Ex: 123456 ou login' value='" + _userId + "'>";
     p += "<label>Senha MQTT</label><input name='m_pass' type='password' value='" + _mqttPass + "'>";
     
     p += "<div class='section'>Servidor de Firmware</div>";
@@ -432,8 +457,8 @@ void IotFeagri::handleSave() {
     _wifiPass = _portalServer->arg("w_pass");
     _mqttBroker = _portalServer->arg("m_host");
     _mqttPort = _portalServer->arg("m_port").toInt();
-    _ra = _portalServer->arg("m_user");
-    _mqttUser = _ra;
+    _userId = _portalServer->arg("m_user");
+    _mqttUser = _userId;
     _mqttPass = _portalServer->arg("m_pass");
     _fwServer = _portalServer->arg("fw_s");
     _useTls = _portalServer->hasArg("tls");
