@@ -75,23 +75,21 @@ void IotFeagri::begin() {
     delay(100);
     loadConfig();
 
-    // Se não tiver RA ou Senha WiFi salvas, entra em modo portal
+    // Se nao tiver usuario ou senha WiFi salvos, entra em modo portal.
     if (_userId.length() == 0 || _wifiPass.length() == 0) {
         Serial.println(">> Configuracao incompleta. Iniciando Portal...");
         startPortal();
         return;
     }
 
-    // Baseline de tempo
     configTime(0, 0, "pool.ntp.org", "time.google.com");
-    
     setupIdentityAndTopics();
 
     connectWiFi();
-    
+
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
     _mqttClient.setCallback(IotFeagri::mqttCallback);
-    
+
     connectMQTT();
 }
 
@@ -105,7 +103,6 @@ void IotFeagri::begin(const char* mqtt_broker, int mqtt_port, const char* mqtt_u
         _userId = mqtt_user;
     }
 
-    // Pula o portal e força conexão manual
     Serial.begin(115200);
     configTime(0, 0, "pool.ntp.org", "time.google.com");
 
@@ -119,17 +116,17 @@ void IotFeagri::begin(const char* mqtt_broker, int mqtt_port, const char* mqtt_u
 
 void IotFeagri::connectWiFi() {
     if (WiFi.status() == WL_CONNECTED) return;
-    
+
     Serial.print("Conectando a WiFi IoT-local...");
     WiFi.mode(WIFI_STA);
     WiFi.begin("IoT-local", _wifiPass.c_str());
-    
+
     unsigned long startTry = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startTry < 20000) {
         delay(500);
         Serial.print(".");
     }
-    
+
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("\nFalha no WiFi! Iniciando Portal...");
         startPortal();
@@ -140,15 +137,15 @@ void IotFeagri::connectWiFi() {
 
 bool IotFeagri::connectMQTT() {
     if (_mqttClient.connected()) return true;
-    
+
     Serial.print("Connecting to MQTT...");
     if (_mqttClient.connect(_deviceId.c_str(), _mqttUser.c_str(), _mqttPass.c_str())) {
         Serial.println("OK");
         _mqttClient.subscribe(_topicSub.c_str());
         _mqttClient.subscribe(_topicFwCmd.c_str());
-        _mqttClient.subscribe(_topicRtcResp.c_str()); 
+        _mqttClient.subscribe(_topicRtcResp.c_str());
         publishFwStatus("boot", "online");
-        requestTimeSync(); 
+        requestTimeSync();
         return true;
     } else {
         Serial.print("Failed, rc=");
@@ -167,7 +164,7 @@ void IotFeagri::loop() {
     if (WiFi.status() != WL_CONNECTED) {
         connectWiFi();
     }
-    
+
     if (!_mqttClient.connected()) {
         unsigned long now = millis();
         if (now - _lastReconnectAttempt > 5000) {
@@ -178,9 +175,9 @@ void IotFeagri::loop() {
         }
     } else {
         _mqttClient.loop();
-        
+
         unsigned long now = millis();
-        if (now - _lastHeartbeatTime >= 30000) { // Heartbeat a cada 30s
+        if (now - _lastHeartbeatTime >= 30000) {
             _lastHeartbeatTime = now;
             sendHeartbeat();
         }
@@ -198,7 +195,6 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     DeserializationError error = deserializeJson(doc, payload, length);
     if (error) return;
 
-    // Se for resposta do RTC
     if (String(topic) == _topicRtcResp) {
         long long unixMs = doc["timestamp"] | 0;
         if (unixMs > 0) {
@@ -216,7 +212,6 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     const char* cmd = doc["command"];
     const char* target = doc["target_id"] | doc["target"] | "";
 
-    // Security Check: Target ID match or "todos"
     if (strlen(target) > 0 && String(target) != _deviceId && String(target) != "todos") {
         return;
     }
@@ -291,7 +286,7 @@ void IotFeagri::sendHeartbeat() {
     if (!_mqttClient.connected()) return;
 
     String hbTopic = String("feagri/") + _userId + "/devices/" + _deviceId + "/heartbeat";
-    
+
     JsonDocument doc;
     doc["type"] = "heartbeat";
     doc["client_id"] = _deviceId;
@@ -312,7 +307,7 @@ void IotFeagri::requestTimeSync() {
     doc["type"] = "COMMAND";
     doc["command"] = "get_time";
     doc["client_id"] = _deviceId;
-    
+
     String out;
     serializeJson(doc, out);
     _mqttClient.publish(_topicRtcReq.c_str(), out.c_str());
@@ -339,7 +334,7 @@ void IotFeagri::publishFwStatus(const char* state, const char* message) {
 
 void IotFeagri::performUpdate() {
     publishFwStatus("starting", "OTA Triggered via Dashboard");
-    
+
     String host = _fwServer.length() > 0 ? _fwServer : _mqttBroker;
     String proto = _useTls ? "https://" : "http://";
     String baseUrl = proto + host;
@@ -353,12 +348,12 @@ void IotFeagri::performUpdate() {
     HTTPClient http;
     http.begin(manifestUrl);
     int httpCode = http.GET();
-    
+
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
         JsonDocument doc;
         deserializeJson(doc, payload);
-        
+
         String defaultFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/firmware.bin";
         String fwUrl = doc["url"] | defaultFwUrl;
         String md5 = doc["md5"] | "";
@@ -373,7 +368,7 @@ void IotFeagri::performUpdate() {
             int len = http.getSize();
             if (Update.begin(len)) {
                 if (md5.length() > 0) Update.setMD5(md5.c_str());
-                
+
                 size_t written = Update.writeStream(http.getStream());
                 if (written == len) {
                     if (Update.end()) {
@@ -402,21 +397,21 @@ void IotFeagri::startPortal() {
     _portalActive = true;
     _dnsServer = new DNSServer();
     _portalServer = new WebServer(80);
-    
+
     uint64_t chipId = ESP.getEfuseMac();
     char ssid[32];
     sprintf(ssid, "IOT_FEAGRI_%04X", (uint16_t)(chipId >> 32));
-    
+
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
     WiFi.softAP(ssid);
-    
+
     _dnsServer->start(53, "*", IPAddress(192, 168, 4, 1));
-    
+
     _portalServer->on("/", [this]() { this->handleRoot(); });
     _portalServer->on("/save", [this]() { this->handleSave(); });
     _portalServer->onNotFound([this]() { this->handleRoot(); });
-    
+
     _portalServer->begin();
     Serial.printf("Portal Ativo! Conecte em: %s (IP 192.168.4.1)\n", ssid);
 }
@@ -431,24 +426,24 @@ void IotFeagri::handleRoot() {
     p += "input[type=text],input[type=password],input[type=number]{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}";
     p += "button{width:100%;padding:12px;background:#005a9c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:16px}";
     p += "button:hover{background:#00467a}.section{border-bottom:2px solid #005a9c;margin-bottom:20px;padding-bottom:5px;font-size:18px;margin-top:20px}";
-    p += "</style></head><body><div class='card'><h2>Configuração IoT FEAGRI</h2>";
+    p += "</style></head><body><div class='card'><h2>Configuracao IoT FEAGRI</h2>";
     p += "<form method='POST' action='/save'>";
-    
-    p += "<div class='section'>Conexão WiFi</div>";
+
+    p += "<div class='section'>Conexao WiFi</div>";
     p += "<label>Rede</label><input type='text' value='IoT-local' readonly>";
     p += "<label>Senha WiFi</label><input name='w_pass' type='password' placeholder='Digite a senha da IoT-local' value='" + _wifiPass + "'>";
-    
-    p += "<div class='section'>Credenciais MQTT</div>";
-    p += "<label>Host Broker</label><input name='m_host' type='text' value='" + _mqttBroker + "'>";
-    p += "<label>Porta</label><input name='m_port' type='number' value='" + String(_mqttPort) + "'>";
-    p += "<label>Usuário MQTT</label><input name='m_user' type='text' placeholder='Ex: 123456 ou login' value='" + _userId + "'>";
+
+    p += "<div class='section'>Acesso ao Broker</div>";
+    p += "<label>Usuario</label><input name='m_user' type='text' placeholder='Ex: 123456' value='" + _userId + "'>";
     p += "<label>Senha MQTT</label><input name='m_pass' type='password' value='" + _mqttPass + "'>";
-    
-    p += "<div class='section'>Servidor de Firmware</div>";
-    p += "<label>URL/IP do Servidor</label><input name='fw_s' type='text' value='" + _fwServer + "'>";
+
+    p += "<div class='section'>Configuracao Avancada</div>";
+    p += "<label>Host do broker</label><input name='m_host' type='text' value='" + _mqttBroker + "'>";
+    p += "<label>Porta</label><input name='m_port' type='number' value='" + String(_mqttPort) + "'>";
+    p += "<label>Servidor de firmware</label><input name='fw_s' type='text' value='" + _fwServer + "'>";
     p += "<label style='display:flex;align-items:center;gap:10px;margin-bottom:20px'>";
     p += "<input type='checkbox' name='tls' " + String(_useTls ? "checked" : "") + "> Usar TLS (HTTPS / Porta 8883)</label>";
-    
+
     p += "<button type='submit'>Salvar e Conectar</button></form></div></body></html>";
     _portalServer->send(200, "text/html", p);
 }
@@ -462,9 +457,9 @@ void IotFeagri::handleSave() {
     _mqttPass = _portalServer->arg("m_pass");
     _fwServer = _portalServer->arg("fw_s");
     _useTls = _portalServer->hasArg("tls");
-    
+
     saveConfig();
-    
+
     _portalServer->send(200, "text/plain", "Configuracoes salvas! Reiniciando...");
     delay(2000);
     ESP.restart();
