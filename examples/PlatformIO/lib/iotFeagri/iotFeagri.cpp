@@ -20,7 +20,7 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _lastHeartbeatTime = 0;
     _timeSynced = false;
     _mqttPort = 1883;
-    _fwVersion = "v1.0.0";
+    _fwVersion = "v1.1.1";
     _portalActive = false;
     _portalServer = nullptr;
     _dnsServer = nullptr;

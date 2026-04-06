@@ -24,24 +24,53 @@ static void applyLedState(bool on) {
   node.publishStatus("led_builtin", on);
 }
 
+static bool parseBoolLike(JsonVariantConst value, bool fallback) {
+  if (value.is<bool>()) {
+    return value.as<bool>();
+  }
+
+  if (value.is<const char*>()) {
+    String text = value.as<const char*>();
+    text.trim();
+    text.toLowerCase();
+    if (text == "true" || text == "1" || text == "on") {
+      return true;
+    }
+    if (text == "false" || text == "0" || text == "off") {
+      return false;
+    }
+  }
+
+  if (value.is<int>()) {
+    return value.as<int>() != 0;
+  }
+
+  return fallback;
+}
+
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   applyLedState(false);
 
   // Inicializa tudo. O Portal abrira se os dados estiverem faltando.
   node.begin();
-  node.setFirmwareVersion("v1.1.0_Arduino");
+  node.setFirmwareVersion("v1.1.1_Arduino");
 
   node.onCommand([](String command, String target, JsonObject data) {
     (void)target;
-    (void)data;
+    String normalized = command;
+    normalized.trim();
+    String lowered = normalized;
+    lowered.toLowerCase();
 
-    if (command == "ON" || command == "led_on") {
+    if (lowered == "on" || lowered == "led_on") {
       applyLedState(true);
-    } else if (command == "OFF" || command == "led_off") {
+    } else if (lowered == "off" || lowered == "led_off") {
       applyLedState(false);
-    } else if (command == "toggle_led") {
+    } else if (lowered == "toggle_led") {
       applyLedState(!ledState);
+    } else if (lowered == "set_led" || lowered == "led_builtin") {
+      applyLedState(parseBoolLike(data["value"], ledState));
     }
   });
 }
