@@ -10,12 +10,40 @@
 #define KEY_MQTT_PASS "m_pass"
 #define KEY_FW_SERVER "fw_s"
 #define KEY_TLS "tls"
+#define KEY_PROFILE "profile"
+
+namespace {
+String buildFirmwareBaseUrl(const String& host, bool useTls) {
+    String trimmedHost = host;
+    trimmedHost.trim();
+    if (trimmedHost.startsWith("http://") || trimmedHost.startsWith("https://")) {
+        return trimmedHost;
+    }
+
+    return String(useTls ? "https://" : "http://") + trimmedHost;
+}
+
+bool isGlobalTarget(const char* target) {
+    return strcmp(target, "todos") == 0 || strcmp(target, "all") == 0;
+}
+
+bool matchesGroup(const char* group, const String& userId) {
+    if (group == nullptr || strlen(group) == 0) {
+        return true;
+    }
+
+    return strcmp(group, "todos") == 0 || strcmp(group, "all") == 0 ||
+           userId.equalsIgnoreCase(group);
+}
+}
 
 IotFeagri* _instance = nullptr;
 
 IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttClient(_espClient) {
     _instance = this;
     _lastReconnectAttempt = 0;
+    _lastWiFiAttempt = 0;
+    _wifiOfflineSince = 0;
     _lastMetricsTime = 0;
     _lastHeartbeatTime = 0;
     _timeSynced = false;
@@ -25,13 +53,42 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _portalServer = nullptr;
     _dnsServer = nullptr;
     _useTls = false;
+    _profile = defaultProfile();
+}
+
+String IotFeagri::defaultProfile() const {
+#if CONFIG_IDF_TARGET_ESP32C3
+    return "exemploESP32C3";
+#else
+    return "exemploESP32";
+#endif
+}
+
+String IotFeagri::currentProfile() const {
+    String profile = _profile;
+    profile.trim();
+    if (profile.length() == 0) {
+        profile = defaultProfile();
+    }
+    return profile;
+}
+
+String IotFeagri::currentGroup() const {
+    String user = _userId;
+    user.trim();
+    String profile = currentProfile();
+    if (profile.length() == 0) {
+        return user;
+    }
+    return user + "_" + profile;
 }
 
 void IotFeagri::setupIdentityAndTopics() {
     uint64_t chipId = ESP.getEfuseMac();
-    char cid[20];
-    sprintf(cid, "%04X%08X", (uint16_t)(chipId >> 32), (uint32_t)chipId);
-    _deviceId = _userId + "_" + String(cid).substring(8);
+    char suffix[7];
+    snprintf(suffix, sizeof(suffix), "%06X",
+             (unsigned int)(chipId & 0xFFFFFFULL));
+    _deviceId = currentGroup() + "_" + String(suffix);
 
     _topicPub = "feagri/" + _userId + "/devices/" + _deviceId + "/data";
     _topicSub = "feagri/" + _userId + "/devices/" + _deviceId + "/cmd";
@@ -46,6 +103,7 @@ void IotFeagri::loadConfig() {
     Preferences prefs;
     prefs.begin(PREF_NAME, true);
     _userId = prefs.getString(KEY_USER, _userId);
+    _profile = prefs.getString(KEY_PROFILE, defaultProfile());
     _wifiPass = prefs.getString(KEY_WIFI_PASS, "");
     _mqttBroker = prefs.getString(KEY_MQTT_HOST, "leandro144.feagri.unicamp.br");
     _mqttPort = prefs.getInt(KEY_MQTT_PORT, 1883);
@@ -60,6 +118,7 @@ void IotFeagri::saveConfig() {
     Preferences prefs;
     prefs.begin(PREF_NAME, false);
     prefs.putString(KEY_USER, _userId);
+    prefs.putString(KEY_PROFILE, currentProfile());
     prefs.putString(KEY_WIFI_PASS, _wifiPass);
     prefs.putString(KEY_MQTT_HOST, _mqttBroker);
     prefs.putInt(KEY_MQTT_PORT, _mqttPort);
@@ -85,9 +144,10 @@ void IotFeagri::begin() {
     configTime(0, 0, "pool.ntp.org", "time.google.com");
     setupIdentityAndTopics();
 
-    connectWiFi();
+    connectWiFi(true);
 
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
+    _mqttClient.setBufferSize(4096);
     _mqttClient.setCallback(IotFeagri::mqttCallback);
 
     connectMQTT();
@@ -108,31 +168,59 @@ void IotFeagri::begin(const char* mqtt_broker, int mqtt_port, const char* mqtt_u
 
     setupIdentityAndTopics();
 
-    connectWiFi();
+    connectWiFi(true);
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
+    _mqttClient.setBufferSize(4096);
     _mqttClient.setCallback(IotFeagri::mqttCallback);
     connectMQTT();
 }
 
-void IotFeagri::connectWiFi() {
-    if (WiFi.status() == WL_CONNECTED) return;
+bool IotFeagri::connectWiFi(bool allowPortalFallback) {
+    if (WiFi.status() == WL_CONNECTED) {
+        _wifiOfflineSince = 0;
+        return true;
+    }
 
-    Serial.print("Conectando a WiFi IoT-local...");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin("IoT-local", _wifiPass.c_str());
+    const unsigned long now = millis();
+    if (_wifiOfflineSince == 0) {
+        _wifiOfflineSince = now;
+    }
 
-    unsigned long startTry = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startTry < 20000) {
-        delay(500);
+    if (WiFi.getMode() != WIFI_STA) {
+        WiFi.mode(WIFI_STA);
+    }
+
+    WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
+
+    if (_lastWiFiAttempt == 0 || now - _lastWiFiAttempt >= 10000UL ||
+        WiFi.status() == WL_IDLE_STATUS || WiFi.status() == WL_DISCONNECTED) {
+        Serial.print("Conectando a WiFi IoT-local...");
+        WiFi.begin("IoT-local", _wifiPass.c_str());
+        _lastWiFiAttempt = now;
+    }
+
+    const unsigned long waitWindowMs = allowPortalFallback ? 20000UL : 5000UL;
+    const unsigned long startTry = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startTry < waitWindowMs) {
+        delay(250);
         Serial.print(".");
     }
 
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\nFalha no WiFi! Iniciando Portal...");
-        startPortal();
-    } else {
+    if (WiFi.status() == WL_CONNECTED) {
+        _wifiOfflineSince = 0;
         Serial.println("\nWiFi Conectado!");
+        return true;
     }
+
+    Serial.println("\nFalha no WiFi.");
+    if (allowPortalFallback || (millis() - _wifiOfflineSince >= 180000UL)) {
+        if (!_portalActive) {
+            Serial.println("Iniciando Portal...");
+            startPortal();
+        }
+    }
+    return false;
 }
 
 bool IotFeagri::connectMQTT() {
@@ -145,6 +233,8 @@ bool IotFeagri::connectMQTT() {
         _mqttClient.subscribe(_topicFwCmd.c_str());
         _mqttClient.subscribe(_topicRtcResp.c_str());
         publishFwStatus("boot", "online");
+        sendHeartbeat();
+        _lastHeartbeatTime = millis();
         requestTimeSync();
         return true;
     } else {
@@ -162,7 +252,10 @@ void IotFeagri::loop() {
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        connectWiFi();
+        connectWiFi(false);
+        if (_portalActive) {
+            return;
+        }
     }
 
     if (!_mqttClient.connected()) {
@@ -177,7 +270,7 @@ void IotFeagri::loop() {
         _mqttClient.loop();
 
         unsigned long now = millis();
-        if (now - _lastHeartbeatTime >= 30000) {
+        if (now - _lastHeartbeatTime >= 10000) {
             _lastHeartbeatTime = now;
             sendHeartbeat();
         }
@@ -212,7 +305,12 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     const char* cmd = doc["command"];
     const char* target = doc["target_id"] | doc["target"] | "";
 
-    if (strlen(target) > 0 && String(target) != _deviceId && String(target) != "todos") {
+    if (strlen(target) > 0 && String(target) != _deviceId && !isGlobalTarget(target)) {
+        return;
+    }
+
+    const char* group = doc["group"] | "";
+    if (isGlobalTarget(target) && !matchesGroup(group, _userId)) {
         return;
     }
 
@@ -230,6 +328,9 @@ bool IotFeagri::publish(const char* grandeur, float value) {
     JsonDocument doc;
     doc["type"] = "MEASUREMENT";
     doc["client_id"] = _deviceId;
+    doc["group"] = currentGroup();
+    doc["owner"] = _userId;
+    doc["profile"] = currentProfile();
     JsonObject data = doc["data"].to<JsonObject>();
     data[grandeur] = value;
 
@@ -246,6 +347,9 @@ bool IotFeagri::publish(const char* grandeur, String value) {
     JsonDocument doc;
     doc["type"] = "MEASUREMENT";
     doc["client_id"] = _deviceId;
+    doc["group"] = currentGroup();
+    doc["owner"] = _userId;
+    doc["profile"] = currentProfile();
     JsonObject data = doc["data"].to<JsonObject>();
     data[grandeur] = value;
 
@@ -266,6 +370,9 @@ bool IotFeagri::publishStatus(const char* key, String value) {
     JsonDocument doc;
     doc["type"] = "STATUS";
     doc["client_id"] = _deviceId;
+    doc["group"] = currentGroup();
+    doc["owner"] = _userId;
+    doc["profile"] = currentProfile();
     JsonObject data = doc["data"].to<JsonObject>();
     data[key] = value;
 
@@ -290,11 +397,14 @@ void IotFeagri::sendHeartbeat() {
     JsonDocument doc;
     doc["type"] = "heartbeat";
     doc["client_id"] = _deviceId;
+    doc["group"] = currentGroup();
     doc["owner"] = _userId;
+    doc["profile"] = currentProfile();
     doc["fw_version"] = _fwVersion;
     doc["ip"] = WiFi.localIP().toString();
     doc["rssi"] = WiFi.RSSI();
     doc["timestamp"] = getUnixTimeMs();
+    doc["uptime"] = (unsigned long long)millis();
     doc["uptime_ms"] = (unsigned long long)millis();
 
     String payload;
@@ -323,6 +433,9 @@ void IotFeagri::publishFwStatus(const char* state, const char* message) {
     JsonDocument doc;
     doc["type"] = "FW_STATUS";
     doc["client_id"] = _deviceId;
+    doc["group"] = currentGroup();
+    doc["owner"] = _userId;
+    doc["profile"] = currentProfile();
     doc["version"] = _fwVersion;
     doc["state"] = state;
     if (strlen(message) > 0) doc["message"] = message;
@@ -336,25 +449,37 @@ void IotFeagri::performUpdate() {
     publishFwStatus("starting", "OTA Triggered via Dashboard");
 
     String host = _fwServer.length() > 0 ? _fwServer : _mqttBroker;
-    String proto = _useTls ? "https://" : "http://";
-    String baseUrl = proto + host;
+    String baseUrl = buildFirmwareBaseUrl(host, _useTls);
 #if CONFIG_IDF_TARGET_ESP32C3
     const char* fwChannel = "generic_esp32c3";
 #else
     const char* fwChannel = "generic_esp32";
 #endif
-    String manifestUrl = baseUrl + "/static/firmware/" + fwChannel + "/manifest.json";
+
+    String groupId = currentGroup();
+    groupId.trim();
+    String manifestUrl = baseUrl + "/static/firmware/" + fwChannel + "/" + groupId + "/manifest.json";
+    String defaultFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/" + groupId + "/" + groupId + ".bin";
+    String legacyManifestUrl = baseUrl + "/static/firmware/" + fwChannel + "/manifest.json";
+    String legacyFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/firmware.bin";
 
     HTTPClient http;
     http.begin(manifestUrl);
     int httpCode = http.GET();
+
+    if (httpCode != HTTP_CODE_OK) {
+        http.end();
+        manifestUrl = legacyManifestUrl;
+        defaultFwUrl = legacyFwUrl;
+        http.begin(manifestUrl);
+        httpCode = http.GET();
+    }
 
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
         JsonDocument doc;
         deserializeJson(doc, payload);
 
-        String defaultFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/firmware.bin";
         String fwUrl = doc["url"] | defaultFwUrl;
         String md5 = doc["md5"] | "";
 
@@ -395,6 +520,7 @@ void IotFeagri::performUpdate() {
 
 void IotFeagri::startPortal() {
     _portalActive = true;
+    _portalStartedAt = millis();
     _dnsServer = new DNSServer();
     _portalServer = new WebServer(80);
 
@@ -435,6 +561,7 @@ void IotFeagri::handleRoot() {
 
     p += "<div class='section'>Acesso ao Broker</div>";
     p += "<label>Usuario</label><input name='m_user' type='text' placeholder='Ex: 123456' value='" + _userId + "'>";
+    p += "<label>Perfil do projeto</label><input name='profile' type='text' placeholder='Ex: exemploESP32' value='" + currentProfile() + "'>";
     p += "<label>Senha MQTT</label><input name='m_pass' type='password' value='" + _mqttPass + "'>";
 
     p += "<div class='section'>Configuracao Avancada</div>";
@@ -453,6 +580,11 @@ void IotFeagri::handleSave() {
     _mqttBroker = _portalServer->arg("m_host");
     _mqttPort = _portalServer->arg("m_port").toInt();
     _userId = _portalServer->arg("m_user");
+    _profile = _portalServer->arg("profile");
+    _profile.trim();
+    if (_profile.length() == 0) {
+        _profile = defaultProfile();
+    }
     _mqttUser = _userId;
     _mqttPass = _portalServer->arg("m_pass");
     _fwServer = _portalServer->arg("fw_s");

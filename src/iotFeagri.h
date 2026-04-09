@@ -50,8 +50,13 @@ public:
     String getVersion() const { return _fwVersion; }
 
 private:
+    String defaultProfile() const;
+    String currentProfile() const;
+    String currentGroup() const;
+
     // Configurações
     String _userId;
+    String _profile;
     String _mqttBroker;
     int _mqttPort;
     String _mqttUser;
@@ -81,6 +86,8 @@ private:
     unsigned long _portalStartedAt;
 
     unsigned long _lastReconnectAttempt;
+    unsigned long _lastWiFiAttempt;
+    unsigned long _wifiOfflineSince;
     unsigned long _lastMetricsTime;
     unsigned long _lastHeartbeatTime;
     bool _timeSynced;
@@ -91,7 +98,7 @@ private:
     void setupIdentityAndTopics();
 
     // WiFi & Portal
-    void connectWiFi();
+    bool connectWiFi(bool allowPortalFallback = false);
     void startPortal();
     void handlePortal();
     void handleRoot();

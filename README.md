@@ -5,6 +5,17 @@
 
 Biblioteca e Kit de Desenvolvimento para simplificar o provisionamento e telemetria de sensores no ecossistema **IoT FEAGRI - UNICAMP**.
 
+Cada dispositivo provisionado pela biblioteca publica:
+- `owner`: usuário MQTT salvo no portal
+- `profile`: perfil do projeto salvo no portal
+- `group`: composição `owner_profile`
+
+Por padrão, a biblioteca usa:
+- `exemploESP32` para placas ESP32
+- `exemploESP32C3` para placas ESP32-C3
+
+O usuário pode alterar o `profile` no portal para separar projetos diferentes sem misturar firmwares na dashboard.
+
 ## 🌟 Principais Recursos
 - **Provisionamento via Portal**: Configure Rede WiFi e Credenciais MQTT via celular (Captive Portal em `192.168.4.1`).
 - **Persistência NVS**: Credenciais são salvas permanentemente na memória do ESP32.
@@ -22,6 +33,7 @@ Para quem deseja apenas colocar a placa em funcionamento imediatamente:
 2. Grave no seu ESP32 usando o [Espressif Flash Download Tool](https://www.espressif.com/en/support/download/other-tools) ou via Web Serial.
 3. No celular, conecte-se à rede WiFi `IOT_FEAGRI_XXXX`.
 4. Acesse `192.168.4.1` e preencha as credenciais.
+5. Defina o `Perfil do projeto`. Se deixar em branco, a biblioteca usa o padrão da arquitetura.
 
 ---
 
@@ -47,8 +59,8 @@ O código básico para integrar seu sensor é muito simples:
 IotFeagri node;
 
 void setup() {
-  node.begin(); // Inicializa WiFi, MQTT e Portal
   node.setFirmwareVersion("v1.1.0");
+  node.begin(); // Inicializa WiFi, MQTT e Portal
 }
 
 void loop() {
@@ -62,6 +74,45 @@ void loop() {
   }
 }
 ```
+
+## Grupos e OTA
+
+Depois do provisionamento, a placa passa a se identificar como:
+- `client_id = <group>_<MAC6>`
+- `group = <user>_<profile>`
+
+Exemplos:
+- `leandro_exemploESP32_3FA780` com `group = leandro_exemploESP32`
+- `ana_estufa_A1B2C3` com `group = ana_estufa`
+
+No fluxo de OTA da biblioteca, o firmware é buscado em:
+- `.../static/firmware/generic_esp32/<group>/...`
+- `.../static/firmware/generic_esp32c3/<group>/...`
+
+Isso evita colisão entre usuários e também separa projetos distintos do mesmo usuário.
+
+A dashboard identifica o grupo a partir do `client_id` no formato:
+- `<group>_<MAC6>`
+
+Ou seja, ela remove o sufixo final `_XXXXXX` e usa o restante como grupo do dispositivo.
+
+### Upload pela dashboard
+
+Ao compilar no exemplo PlatformIO, o artefato gerado continua sendo `firmware.bin`.
+
+Antes de fazer upload na dashboard, renomeie esse arquivo para o nome do grupo esperado pela placa:
+- ESP32 com perfil padrão: `<user>_exemploESP32.bin`
+- ESP32-C3 com perfil padrão: `<user>_exemploESP32C3.bin`
+- projeto com perfil customizado: `<user>_<profile>.bin`
+
+Exemplos:
+- `leandro_exemploESP32.bin`
+- `ana_estufa.bin`
+
+Isso permite que a dashboard detecte corretamente o grupo e grave o `manifest.json` no namespace esperado pelo OTA da biblioteca, mantendo coerência entre:
+- nome do arquivo enviado
+- grupo do dispositivo
+- prefixo do `client_id`
 
 ---
 
