@@ -23,6 +23,31 @@ String buildFirmwareBaseUrl(const String& host, bool useTls) {
     return String(useTls ? "https://" : "http://") + trimmedHost;
 }
 
+bool urlUsesTls(const String& url) {
+    return url.startsWith("https://");
+}
+
+void configureSecureClient(WiFiClientSecure& client, const char* caCert, bool allowInsecure) {
+    client.stop();
+    if (caCert != nullptr && strlen(caCert) > 0) {
+        client.setCACert(caCert);
+        return;
+    }
+    if (allowInsecure) {
+        client.setInsecure();
+    }
+}
+
+bool beginHttpRequest(HTTPClient& http, const String& url, WiFiClient& tcp,
+                      WiFiClientSecure& tls, const char* caCert,
+                      bool allowInsecure) {
+    if (urlUsesTls(url)) {
+        configureSecureClient(tls, caCert, allowInsecure);
+        return http.begin(tls, url);
+    }
+    return http.begin(tcp, url);
+}
+
 bool isGlobalTarget(const char* target) {
     return strcmp(target, "todos") == 0 || strcmp(target, "all") == 0;
 }
@@ -54,6 +79,10 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _dnsServer = nullptr;
     _useTls = false;
     _profile = defaultProfile();
+    _mqttCaCert = nullptr;
+    _firmwareCaCert = nullptr;
+    _mqttAllowInsecure = true;
+    _firmwareAllowInsecure = true;
 }
 
 String IotFeagri::defaultProfile() const {
@@ -146,6 +175,7 @@ void IotFeagri::begin() {
 
     connectWiFi(true);
 
+    configureMqttTransport();
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
     _mqttClient.setBufferSize(4096);
     _mqttClient.setCallback(IotFeagri::mqttCallback);
@@ -169,6 +199,7 @@ void IotFeagri::begin(const char* mqtt_broker, int mqtt_port, const char* mqtt_u
     setupIdentityAndTopics();
 
     connectWiFi(true);
+    configureMqttTransport();
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
     _mqttClient.setBufferSize(4096);
     _mqttClient.setCallback(IotFeagri::mqttCallback);
@@ -241,6 +272,16 @@ bool IotFeagri::connectMQTT() {
         Serial.print("Failed, rc=");
         Serial.println(_mqttClient.state());
         return false;
+    }
+}
+
+void IotFeagri::configureMqttTransport() {
+    const bool mqttUsesTls = _useTls || _mqttPort == 8883;
+    if (mqttUsesTls) {
+        configureSecureClient(_secureClient, _mqttCaCert, _mqttAllowInsecure);
+        _mqttClient.setClient(_secureClient);
+    } else {
+        _mqttClient.setClient(_espClient);
     }
 }
 
@@ -385,6 +426,22 @@ void IotFeagri::setFirmwareVersion(const char* version) {
     _fwVersion = version;
 }
 
+void IotFeagri::setMqttCaCert(const char* caCert) {
+    _mqttCaCert = caCert;
+}
+
+void IotFeagri::setFirmwareCaCert(const char* caCert) {
+    _firmwareCaCert = caCert;
+}
+
+void IotFeagri::setMqttAllowInsecure(bool allowInsecure) {
+    _mqttAllowInsecure = allowInsecure;
+}
+
+void IotFeagri::setFirmwareAllowInsecure(bool allowInsecure) {
+    _firmwareAllowInsecure = allowInsecure;
+}
+
 void IotFeagri::onCommand(CommandCallback callback) {
     _userCallback = callback;
 }
@@ -464,14 +521,22 @@ void IotFeagri::performUpdate() {
     String legacyFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/firmware.bin";
 
     HTTPClient http;
-    http.begin(manifestUrl);
+    if (!beginHttpRequest(http, manifestUrl, _espClient, _secureClient,
+                          _firmwareCaCert, _firmwareAllowInsecure)) {
+        publishFwStatus("error", "HTTP begin manifest failed");
+        return;
+    }
     int httpCode = http.GET();
 
     if (httpCode != HTTP_CODE_OK) {
         http.end();
         manifestUrl = legacyManifestUrl;
         defaultFwUrl = legacyFwUrl;
-        http.begin(manifestUrl);
+        if (!beginHttpRequest(http, manifestUrl, _espClient, _secureClient,
+                              _firmwareCaCert, _firmwareAllowInsecure)) {
+            publishFwStatus("error", "HTTP begin legacy manifest failed");
+            return;
+        }
         httpCode = http.GET();
     }
 
@@ -486,7 +551,11 @@ void IotFeagri::performUpdate() {
         publishFwStatus("downloading", fwUrl.c_str());
 
         http.end();
-        http.begin(fwUrl);
+        if (!beginHttpRequest(http, fwUrl, _espClient, _secureClient,
+                              _firmwareCaCert, _firmwareAllowInsecure)) {
+            publishFwStatus("error", "HTTP begin firmware failed");
+            return;
+        }
         httpCode = http.GET();
 
         if (httpCode == HTTP_CODE_OK) {

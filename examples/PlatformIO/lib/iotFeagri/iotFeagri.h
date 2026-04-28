@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Update.h>
 #include <WebServer.h>
@@ -41,6 +42,10 @@ public:
 
     // Define a versão do firmware (importante para o OTA)
     void setFirmwareVersion(const char* version);
+    void setMqttCaCert(const char* caCert);
+    void setFirmwareCaCert(const char* caCert);
+    void setMqttAllowInsecure(bool allowInsecure);
+    void setFirmwareAllowInsecure(bool allowInsecure);
     
     // Define o callback para comandos vindos da dashboard
     void onCommand(CommandCallback callback);
@@ -76,8 +81,13 @@ private:
     String _topicRtcResp;
 
     WiFiClient _espClient;
+    WiFiClientSecure _secureClient;
     PubSubClient _mqttClient;
     CommandCallback _userCallback;
+    const char* _mqttCaCert;
+    const char* _firmwareCaCert;
+    bool _mqttAllowInsecure;
+    bool _firmwareAllowInsecure;
 
     // Portal & DNS
     WebServer* _portalServer;
@@ -105,6 +115,7 @@ private:
     void handleSave();
 
     bool connectMQTT();
+    void configureMqttTransport();
     static void mqttCallback(char* topic, byte* payload, unsigned int length);
     void handleMqttMessage(char* topic, byte* payload, unsigned int length);
     
