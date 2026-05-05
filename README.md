@@ -86,10 +86,43 @@ Exemplos:
 - `ana_estufa_A1B2C3` com `group = ana_estufa`
 
 No fluxo de OTA da biblioteca, o firmware é buscado em:
+- `.../static/firmware/<group>/manifest.json`
+- `.../static/firmware/<group>/firmware.bin`
+
+Para manter compatibilidade com uploads antigos, a biblioteca tambem tenta como fallback:
 - `.../static/firmware/generic_esp32/<group>/...`
 - `.../static/firmware/generic_esp32c3/<group>/...`
 
 Isso evita colisão entre usuários e também separa projetos distintos do mesmo usuário.
+
+A biblioteca tambem assina comandos por grupo no formato:
+- `feagri/<user>/groups/<group>/cmd`
+
+Exemplo para `client_id = leandro_exemploESP32_20F540`:
+- `user = leandro`
+- `group = leandro_exemploESP32`
+- topico de grupo: `feagri/leandro/groups/leandro_exemploESP32/cmd`
+
+Comandos enviados nesse topico sao recebidos por todas as placas do mesmo grupo.
+
+O heartbeat e publicado a cada 10 segundos em:
+- `feagri/<user>/devices/<client_id>/heartbeat`
+
+Payload:
+```json
+{
+  "type": "heartbeat",
+  "client_id": "leandro_exemploESP32_20F540",
+  "group": "leandro_exemploESP32",
+  "owner": "leandro",
+  "profile": "exemploESP32",
+  "fw_version": "v1.1.1",
+  "ip": "192.168.1.100",
+  "rssi": -55,
+  "timestamp": 1704825600000,
+  "uptime_ms": 3600000
+}
+```
 
 A dashboard identifica o grupo a partir do `client_id` no formato:
 - `<group>_<MAC6>`
@@ -98,16 +131,33 @@ Ou seja, ela remove o sufixo final `_XXXXXX` e usa o restante como grupo do disp
 
 ### Upload pela dashboard
 
-Ao compilar no exemplo PlatformIO, o artefato gerado continua sendo `firmware.bin`.
+Ao compilar no exemplo PlatformIO, o artefato base continua sendo `firmware.bin`, mas o script `rename_bin.py` tambem cria uma copia com o nome do grupo para upload OTA.
 
-Antes de fazer upload na dashboard, renomeie esse arquivo para o nome do grupo esperado pela placa:
+Arquivos gerados por padrao:
 - ESP32 com perfil padrão: `<user>_exemploESP32.bin`
 - ESP32-C3 com perfil padrão: `<user>_exemploESP32C3.bin`
 - projeto com perfil customizado: `<user>_<profile>.bin`
 
 Exemplos:
 - `leandro_exemploESP32.bin`
+- `leandro_exemploESP32C3.bin`
 - `ana_estufa.bin`
+
+No exemplo PlatformIO, o usuario padrao do script e `leandro`. Para gerar outro nome sem editar o script, defina uma variavel de ambiente antes da compilacao:
+- `IOTFEAGRI_OTA_USER=ana`
+- `IOTFEAGRI_OTA_PROFILE=estufa`
+- ou `IOTFEAGRI_OTA_GROUP=ana_estufa` para informar o grupo completo.
+
+O campo `Versao` informado na dashboard e salvo no `manifest.json`. Apos uma OTA concluida com sucesso, a biblioteca persiste essa versao na NVS e passa a reporta-la no `heartbeat` e no `FW_STATUS`. Se o `manifest.json` tiver a mesma versao que a placa ja reporta, a biblioteca publica `FW_STATUS` com `state = "skipped"` e nao regrava o firmware.
+
+Durante a OTA, a biblioteca publica `FW_STATUS` em `feagri/firmware/update/status` com estados intermediarios:
+- `manifest_url`: URL de manifest que sera testada
+- `starting`: manifest carregado, com versao e MD5 quando disponiveis
+- `ota_url`: URL do binario OTA que sera baixado
+- `downloading`: HTTP 200 recebido e progresso de escrita, com `progress`, `written` e `total`
+- `updated`: gravacao finalizada, antes do reboot
+- `error`: erro de manifest, download, escrita, MD5 ou tamanho
+- `skipped`: versao do manifest igual a versao ja instalada
 
 Isso permite que a dashboard detecte corretamente o grupo e grave o `manifest.json` no namespace esperado pelo OTA da biblioteca, mantendo coerência entre:
 - nome do arquivo enviado

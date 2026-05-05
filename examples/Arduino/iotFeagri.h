@@ -74,6 +74,7 @@ private:
     String _fwVersion;
     String _topicPub;
     String _topicSub;
+    String _topicGroupCmd;
     String _topicStatus;
     String _topicFwCmd;
     String _topicFwStatus;
@@ -105,6 +106,7 @@ private:
     // Persistência
     void loadConfig();
     void saveConfig();
+    void saveFirmwareVersion();
     void setupIdentityAndTopics();
 
     // WiFi & Portal
@@ -122,6 +124,9 @@ private:
     // OTA Pull Logic
     void performUpdate();
     void publishFwStatus(const char* state, const char* message = "");
+    void publishFwStatusDetail(const char* state, const String& message,
+                               int progress = -1, int written = -1,
+                               int total = -1, const String& url = "");
 
     // Heartbeat & Time Sync
     void sendHeartbeat();

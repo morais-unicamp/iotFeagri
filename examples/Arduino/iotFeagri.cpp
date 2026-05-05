@@ -11,6 +11,7 @@
 #define KEY_FW_SERVER "fw_s"
 #define KEY_TLS "tls"
 #define KEY_PROFILE "profile"
+#define KEY_FW_VERSION "fw_ver"
 
 namespace {
 String buildFirmwareBaseUrl(const String& host, bool useTls) {
@@ -52,13 +53,13 @@ bool isGlobalTarget(const char* target) {
     return strcmp(target, "todos") == 0 || strcmp(target, "all") == 0;
 }
 
-bool matchesGroup(const char* group, const String& userId) {
+bool matchesGroup(const char* group, const String& userId, const String& groupId) {
     if (group == nullptr || strlen(group) == 0) {
         return true;
     }
 
     return strcmp(group, "todos") == 0 || strcmp(group, "all") == 0 ||
-           userId.equalsIgnoreCase(group);
+           userId.equalsIgnoreCase(group) || groupId.equalsIgnoreCase(group);
 }
 }
 
@@ -121,6 +122,7 @@ void IotFeagri::setupIdentityAndTopics() {
 
     _topicPub = "feagri/" + _userId + "/devices/" + _deviceId + "/data";
     _topicSub = "feagri/" + _userId + "/devices/" + _deviceId + "/cmd";
+    _topicGroupCmd = "feagri/" + _userId + "/groups/" + currentGroup() + "/cmd";
     _topicStatus = "feagri/" + _userId + "/devices/" + _deviceId + "/status";
     _topicFwCmd = "feagri/firmware/update/cmd";
     _topicFwStatus = "feagri/firmware/update/status";
@@ -140,6 +142,7 @@ void IotFeagri::loadConfig() {
     _mqttPass = prefs.getString(KEY_MQTT_PASS, "");
     _fwServer = prefs.getString(KEY_FW_SERVER, "leandro144.feagri.unicamp.br");
     _useTls = prefs.getBool(KEY_TLS, false);
+    _fwVersion = prefs.getString(KEY_FW_VERSION, _fwVersion);
     prefs.end();
 }
 
@@ -155,6 +158,13 @@ void IotFeagri::saveConfig() {
     prefs.putString(KEY_MQTT_PASS, _mqttPass);
     prefs.putString(KEY_FW_SERVER, _fwServer);
     prefs.putBool(KEY_TLS, _useTls);
+    prefs.end();
+}
+
+void IotFeagri::saveFirmwareVersion() {
+    Preferences prefs;
+    prefs.begin(PREF_NAME, false);
+    prefs.putString(KEY_FW_VERSION, _fwVersion);
     prefs.end();
 }
 
@@ -261,6 +271,7 @@ bool IotFeagri::connectMQTT() {
     if (_mqttClient.connect(_deviceId.c_str(), _mqttUser.c_str(), _mqttPass.c_str())) {
         Serial.println("OK");
         _mqttClient.subscribe(_topicSub.c_str());
+        _mqttClient.subscribe(_topicGroupCmd.c_str());
         _mqttClient.subscribe(_topicFwCmd.c_str());
         _mqttClient.subscribe(_topicRtcResp.c_str());
         publishFwStatus("boot", "online");
@@ -325,11 +336,13 @@ void IotFeagri::mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int length) {
+    String topicStr(topic);
+
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
     if (error) return;
 
-    if (String(topic) == _topicRtcResp) {
+    if (topicStr == _topicRtcResp) {
         long long unixMs = doc["timestamp"] | 0;
         if (unixMs > 0) {
             struct timeval tv;
@@ -345,13 +358,16 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     const char* type = doc["type"];
     const char* cmd = doc["command"];
     const char* target = doc["target_id"] | doc["target"] | "";
+    const bool isGroupTopic = topicStr == _topicGroupCmd;
+    const String groupId = currentGroup();
 
-    if (strlen(target) > 0 && String(target) != _deviceId && !isGlobalTarget(target)) {
+    if (strlen(target) > 0 && String(target) != _deviceId && !isGlobalTarget(target) &&
+        !(isGroupTopic && groupId.equalsIgnoreCase(target))) {
         return;
     }
 
     const char* group = doc["group"] | "";
-    if (isGlobalTarget(target) && !matchesGroup(group, _userId)) {
+    if ((isGlobalTarget(target) || isGroupTopic) && !matchesGroup(group, _userId, groupId)) {
         return;
     }
 
@@ -461,7 +477,6 @@ void IotFeagri::sendHeartbeat() {
     doc["ip"] = WiFi.localIP().toString();
     doc["rssi"] = WiFi.RSSI();
     doc["timestamp"] = getUnixTimeMs();
-    doc["uptime"] = (unsigned long long)millis();
     doc["uptime_ms"] = (unsigned long long)millis();
 
     String payload;
@@ -487,6 +502,12 @@ uint64_t IotFeagri::getUnixTimeMs() {
 }
 
 void IotFeagri::publishFwStatus(const char* state, const char* message) {
+    publishFwStatusDetail(state, String(message));
+}
+
+void IotFeagri::publishFwStatusDetail(const char* state, const String& message,
+                                      int progress, int written, int total,
+                                      const String& url) {
     JsonDocument doc;
     doc["type"] = "FW_STATUS";
     doc["client_id"] = _deviceId;
@@ -495,11 +516,17 @@ void IotFeagri::publishFwStatus(const char* state, const char* message) {
     doc["profile"] = currentProfile();
     doc["version"] = _fwVersion;
     doc["state"] = state;
-    if (strlen(message) > 0) doc["message"] = message;
+    doc["timestamp"] = getUnixTimeMs();
+    if (message.length() > 0) doc["message"] = message;
+    if (progress >= 0) doc["progress"] = progress;
+    if (written >= 0) doc["written"] = written;
+    if (total >= 0) doc["total"] = total;
+    if (url.length() > 0) doc["url"] = url;
 
     String jsonStr;
     serializeJson(doc, jsonStr);
     _mqttClient.publish(_topicFwStatus.c_str(), jsonStr.c_str());
+    _mqttClient.loop();
 }
 
 void IotFeagri::performUpdate() {
@@ -515,10 +542,14 @@ void IotFeagri::performUpdate() {
 
     String groupId = currentGroup();
     groupId.trim();
-    String manifestUrl = baseUrl + "/static/firmware/" + fwChannel + "/" + groupId + "/manifest.json";
-    String defaultFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/" + groupId + "/" + groupId + ".bin";
+    String manifestUrl = baseUrl + "/static/firmware/" + groupId + "/manifest.json";
+    String defaultFwUrl = baseUrl + "/static/firmware/" + groupId + "/firmware.bin";
+    String channelManifestUrl = baseUrl + "/static/firmware/" + fwChannel + "/" + groupId + "/manifest.json";
+    String channelFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/" + groupId + "/" + groupId + ".bin";
     String legacyManifestUrl = baseUrl + "/static/firmware/" + fwChannel + "/manifest.json";
     String legacyFwUrl = baseUrl + "/static/firmware/" + fwChannel + "/firmware.bin";
+
+    publishFwStatusDetail("manifest_url", manifestUrl, -1, -1, -1, manifestUrl);
 
     HTTPClient http;
     if (!beginHttpRequest(http, manifestUrl, _espClient, _secureClient,
@@ -530,8 +561,22 @@ void IotFeagri::performUpdate() {
 
     if (httpCode != HTTP_CODE_OK) {
         http.end();
+        manifestUrl = channelManifestUrl;
+        defaultFwUrl = channelFwUrl;
+        publishFwStatusDetail("manifest_url", manifestUrl, -1, -1, -1, manifestUrl);
+        if (!beginHttpRequest(http, manifestUrl, _espClient, _secureClient,
+                              _firmwareCaCert, _firmwareAllowInsecure)) {
+            publishFwStatus("error", "HTTP begin channel manifest failed");
+            return;
+        }
+        httpCode = http.GET();
+    }
+
+    if (httpCode != HTTP_CODE_OK) {
+        http.end();
         manifestUrl = legacyManifestUrl;
         defaultFwUrl = legacyFwUrl;
+        publishFwStatusDetail("manifest_url", manifestUrl, -1, -1, -1, manifestUrl);
         if (!beginHttpRequest(http, manifestUrl, _espClient, _secureClient,
                               _firmwareCaCert, _firmwareAllowInsecure)) {
             publishFwStatus("error", "HTTP begin legacy manifest failed");
@@ -547,8 +592,21 @@ void IotFeagri::performUpdate() {
 
         String fwUrl = doc["url"] | defaultFwUrl;
         String md5 = doc["md5"] | "";
+        String manifestVersion = doc["version"] | "";
 
-        publishFwStatus("downloading", fwUrl.c_str());
+        manifestVersion.trim();
+        if (manifestVersion.length() > 0 && manifestVersion == _fwVersion) {
+            publishFwStatus("skipped", "Firmware version already installed");
+            http.end();
+            return;
+        }
+
+        String manifestMessage = "version=" + manifestVersion;
+        if (md5.length() > 0) {
+            manifestMessage += " md5=" + md5;
+        }
+        publishFwStatusDetail("starting", manifestMessage, -1, -1, -1, manifestUrl);
+        publishFwStatusDetail("ota_url", fwUrl, 0, 0, -1, fwUrl);
 
         http.end();
         if (!beginHttpRequest(http, fwUrl, _espClient, _secureClient,
@@ -560,20 +618,69 @@ void IotFeagri::performUpdate() {
 
         if (httpCode == HTTP_CODE_OK) {
             int len = http.getSize();
+            publishFwStatusDetail("downloading", "HTTP 200", 0, 0, len, fwUrl);
             if (Update.begin(len)) {
                 if (md5.length() > 0) Update.setMD5(md5.c_str());
 
-                size_t written = Update.writeStream(http.getStream());
+                WiFiClient* stream = http.getStreamPtr();
+                uint8_t buffer[1024];
+                size_t written = 0;
+                int lastProgress = -1;
+
+                while (http.connected() && (len <= 0 || written < (size_t)len)) {
+                    size_t available = stream->available();
+                    if (available == 0) {
+                        delay(5);
+                        _mqttClient.loop();
+                        continue;
+                    }
+
+                    size_t toRead = available;
+                    if (toRead > sizeof(buffer)) {
+                        toRead = sizeof(buffer);
+                    }
+
+                    int readLen = stream->readBytes(buffer, toRead);
+                    if (readLen <= 0) {
+                        continue;
+                    }
+
+                    size_t chunkWritten = Update.write(buffer, readLen);
+                    if (chunkWritten != (size_t)readLen) {
+                        publishFwStatus("error", "Update.write failed");
+                        Update.abort();
+                        http.end();
+                        return;
+                    }
+
+                    written += chunkWritten;
+                    if (len > 0) {
+                        int progress = (int)((written * 100ULL) / (unsigned int)len);
+                        if (progress >= 100 || progress == 0 || progress >= lastProgress + 10) {
+                            lastProgress = progress;
+                            publishFwStatusDetail("downloading", "writing firmware", progress,
+                                                  (int)written, len, fwUrl);
+                        }
+                    }
+                }
+
                 if (written == len) {
                     if (Update.end()) {
-                        publishFwStatus("updated", "Success! Rebooting...");
-                        delay(500);
+                        if (manifestVersion.length() > 0) {
+                            _fwVersion = manifestVersion;
+                            saveFirmwareVersion();
+                        }
+                        publishFwStatusDetail("updated", "Success! Rebooting...", 100,
+                                              (int)written, len, fwUrl);
+                        _mqttClient.loop();
+                        delay(1500);
                         ESP.restart();
                     } else {
                         publishFwStatus("error", Update.errorString());
                     }
                 } else {
-                    publishFwStatus("error", "Written size mismatch");
+                    publishFwStatusDetail("error", "Written size mismatch", -1,
+                                          (int)written, len, fwUrl);
                 }
             } else {
                 publishFwStatus("error", "Update.begin failed");
