@@ -39,6 +39,7 @@ public:
     bool publishStatus(const char* key, bool value);
     bool publishStatus(const char* key, const char* value);
     bool publishStatus(const char* key, String value);
+    bool isOtaActive() const { return _otaActive; }
 
     // Define a versão do firmware (importante para o OTA)
     void setFirmwareVersion(const char* version);
@@ -89,6 +90,7 @@ private:
     const char* _firmwareCaCert;
     bool _mqttAllowInsecure;
     bool _firmwareAllowInsecure;
+    bool _otaActive;
 
     // Portal & DNS
     WebServer* _portalServer;
@@ -107,6 +109,9 @@ private:
     void loadConfig();
     void saveConfig();
     void saveFirmwareVersion();
+    void persistPendingFirmwareStatus(const String& version);
+    bool publishPendingFirmwareStatus();
+    void clearPendingFirmwareStatus();
     void setupIdentityAndTopics();
 
     // WiFi & Portal
@@ -122,11 +127,17 @@ private:
     void handleMqttMessage(char* topic, byte* payload, unsigned int length);
     
     // OTA Pull Logic
-    void performUpdate();
-    void publishFwStatus(const char* state, const char* message = "");
-    void publishFwStatusDetail(const char* state, const String& message,
+    void performUpdate(bool commandNeedsStagger = false);
+    bool publishFwStatus(const char* state, const char* message = "");
+    bool publishFwStatusDetail(const char* state, const String& message,
                                int progress = -1, int written = -1,
                                int total = -1, const String& url = "");
+    bool downloadFirmwareWithRetry(const String& fwUrl, const String& md5,
+                                   const String& manifestVersion,
+                                   int maxAttempts);
+    bool downloadFirmwareOnce(const String& fwUrl, const String& md5,
+                              const String& manifestVersion, String& err);
+    void waitOtaStagger(const char* reason);
 
     // Heartbeat & Time Sync
     void sendHeartbeat();
