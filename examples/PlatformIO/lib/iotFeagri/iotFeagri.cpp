@@ -15,6 +15,8 @@
 #define KEY_FW_VERSION "fw_ver"
 #define KEY_FW_STATUS_STATE "fw_state"
 #define KEY_FW_STATUS_MSG "fw_msg"
+#define KEY_WEB_USER "web_user"
+#define KEY_WEB_PASS "web_pass"
 
 static const char GLOBALSIGN_ROOT_CA_R3[] = R"EOF(
 -----BEGIN CERTIFICATE-----
@@ -121,6 +123,28 @@ String commandValue(JsonDocument& doc, const char* primary, const char* fallback
     return "";
 }
 
+bool parseUserPassArgument(const String& argument, String& user, String& pass) {
+    String text = argument;
+    text.trim();
+    if (text.length() == 0) {
+        return false;
+    }
+
+    int sep = text.indexOf(':');
+    if (sep < 0) {
+        sep = text.indexOf(' ');
+    }
+    if (sep <= 0 || sep >= (int)text.length() - 1) {
+        return false;
+    }
+
+    user = text.substring(0, sep);
+    pass = text.substring(sep + 1);
+    user.trim();
+    pass.trim();
+    return user.length() > 0 && pass.length() > 0;
+}
+
 bool matchesGroup(const char* group, const String& userId, const String& groupId) {
     if (group == nullptr || strlen(group) == 0) {
         return true;
@@ -162,6 +186,11 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _firmwareAllowInsecure = false;
     _otaActive = false;
     _webOtaWritten = 0;
+    _serialCliReady = false;
+    _webUser = "admin";
+    _webPass = "admin";
+    _webSessionUntil = 0;
+    _serialInput.reserve(96);
 }
 
 String IotFeagri::defaultProfile() const {
@@ -271,6 +300,14 @@ void IotFeagri::loadConfig() {
     _fwServer = prefs.getString(KEY_FW_SERVER, "");
     _useTls = prefs.getBool(KEY_TLS, false);
     _fwVersion = prefs.getString(KEY_FW_VERSION, _fwVersion);
+    _webUser = prefs.isKey(KEY_WEB_USER) ? prefs.getString(KEY_WEB_USER) : "admin";
+    _webPass = prefs.isKey(KEY_WEB_PASS) ? prefs.getString(KEY_WEB_PASS) : "admin";
+    if (_webUser.length() == 0) {
+        _webUser = "admin";
+    }
+    if (_webPass.length() == 0) {
+        _webPass = "admin";
+    }
     prefs.end();
 }
 
@@ -286,6 +323,8 @@ void IotFeagri::saveConfig() {
     prefs.putString(KEY_MQTT_PASS, _mqttPass);
     prefs.putString(KEY_FW_SERVER, _fwServer);
     prefs.putBool(KEY_TLS, _useTls);
+    prefs.putString(KEY_WEB_USER, _webUser);
+    prefs.putString(KEY_WEB_PASS, _webPass);
     prefs.end();
 }
 
@@ -313,8 +352,12 @@ void IotFeagri::persistPendingFirmwareStatus(const String& version) {
 bool IotFeagri::publishPendingFirmwareStatus() {
     Preferences prefs;
     prefs.begin(PREF_NAME, true);
-    String state = prefs.getString(KEY_FW_STATUS_STATE, "");
-    String message = prefs.getString(KEY_FW_STATUS_MSG, "");
+    String state = prefs.isKey(KEY_FW_STATUS_STATE)
+                       ? prefs.getString(KEY_FW_STATUS_STATE)
+                       : "";
+    String message = prefs.isKey(KEY_FW_STATUS_MSG)
+                         ? prefs.getString(KEY_FW_STATUS_MSG)
+                         : "";
     prefs.end();
 
     if (state.length() == 0) {
@@ -332,6 +375,13 @@ void IotFeagri::clearPendingFirmwareStatus() {
     prefs.begin(PREF_NAME, false);
     prefs.remove(KEY_FW_STATUS_STATE);
     prefs.remove(KEY_FW_STATUS_MSG);
+    prefs.end();
+}
+
+void IotFeagri::resetConfig() {
+    Preferences prefs;
+    prefs.begin(PREF_NAME, false);
+    prefs.clear();
     prefs.end();
 }
 
@@ -474,6 +524,8 @@ void IotFeagri::configureMqttTransport() {
 }
 
 void IotFeagri::loop() {
+    handleSerialInput();
+
     if (_portalServer != nullptr) {
         if (_portalActive && _dnsServer != nullptr) {
             _dnsServer->processNextRequest();
@@ -568,7 +620,8 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     if (String(type) == "COMMAND") {
         String command = cmd ? String(cmd) : "";
         String commandLower = lowerTrimmed(command);
-        if (command == "UPDATE" || command == "update_firmware" || command == "trigger_update") {
+        if (command == "UPDATE" || commandLower == "update_firmware" ||
+            commandLower == "trigger_update") {
             String groupCommand = lowerTrimmed(String(group));
             bool commandNeedsStagger =
                 targetLower.length() == 0 || isGlobalTarget(targetLower.c_str()) ||
@@ -586,6 +639,10 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
             _fwServer = host;
             saveConfig();
             publishFwStatus("set_firmware_host", _fwServer.length() ? _fwServer.c_str() : "default");
+        } else if (commandLower == "get_fw_host" ||
+                   commandLower == "get_firmware_host") {
+            publishCommandStatus(command.c_str(), "ok",
+                                 _fwServer.length() ? _fwServer : "default");
         } else if (commandLower == "get_firmware_version" ||
                    commandLower == "get_fw_version") {
             publishFwStatus("firmware_version", _fwVersion.c_str());
@@ -600,9 +657,176 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
             } else {
                 publishFwStatus("error", "Firmware version empty");
             }
+        } else if (commandLower == "reboot") {
+            publishCommandStatus(command.c_str(), "ok", "rebooting");
+            delay(200);
+            ESP.restart();
+        } else if (commandLower == "status") {
+            String message = "wifi=" +
+                             String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") +
+                             " mqtt=" +
+                             String(_mqttClient.connected() ? "connected" : "disconnected") +
+                             " heap=" + String(ESP.getFreeHeap()) +
+                             " ip=" + WiFi.localIP().toString();
+            publishCommandStatus(command.c_str(), "ok", message);
+        } else if (commandLower == "config") {
+            String message = "mqtt_host=" + _mqttBroker +
+                             " mqtt_port=" + String(_mqttPort) +
+                             " user=" + _userId +
+                             " profile=" + currentProfile() +
+                             " fw_version=" + _fwVersion +
+                             " fw_host=" + (_fwServer.length() ? _fwServer : "default");
+            publishCommandStatus(command.c_str(), "ok", message);
+        } else if (commandLower == "open_portal") {
+            startPortal();
+            publishCommandStatus(command.c_str(), "ok", "portal_open");
+        } else if (commandLower == "close_portal") {
+            _portalActive = false;
+            if (_dnsServer != nullptr) {
+                _dnsServer->stop();
+            }
+            if (WiFi.getMode() == WIFI_AP) {
+                WiFi.softAPdisconnect(true);
+                WiFi.mode(WIFI_STA);
+            }
+            publishCommandStatus(command.c_str(), "ok", "portal_closed");
+        } else if (commandLower == "set_web_auth" ||
+                   commandLower == "set_web_credentials" ||
+                   commandLower == "set_portal_credentials") {
+            String user = commandValue(doc, "user", "web_user");
+            String pass = commandValue(doc, "pass", "web_pass");
+            user.trim();
+            pass.trim();
+            if (user.length() == 0 || pass.length() == 0) {
+                String arg = commandValue(doc, "value", "argument");
+                if (arg.length() == 0) {
+                    arg = commandValue(doc, "args");
+                }
+                parseUserPassArgument(arg, user, pass);
+            }
+            if (user.length() == 0 || pass.length() < 4) {
+                publishCommandStatus(command.c_str(), "error", "invalid_credentials");
+            } else {
+                _webUser = user;
+                _webPass = pass;
+                _webSessionId = "";
+                _webSessionUntil = 0;
+                saveConfig();
+                publishCommandStatus(command.c_str(), "ok", "updated");
+            }
         } else if (_userCallback) {
             _userCallback(command, String(target), doc["data"].as<JsonObject>());
         }
+    }
+}
+
+void IotFeagri::handleSerialInput() {
+    if (!_serialCliReady && millis() > 2000) {
+        _serialCliReady = true;
+        Serial.println();
+        Serial.println("iotFeagri CLI pronto. Digite 'help' para comandos.");
+        Serial.print("> ");
+    }
+
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        Serial.print(c);
+
+        if (c == '\n' || c == '\r') {
+            Serial.println();
+            if (_serialInput.length() > 0) {
+                processSerialCommand(_serialInput);
+                _serialInput = "";
+            }
+            Serial.print("> ");
+        } else if (c == 0x08 || c == 0x7F) {
+            if (_serialInput.length() > 0) {
+                _serialInput.remove(_serialInput.length() - 1);
+            }
+        } else if (isPrintable((unsigned char)c) && _serialInput.length() < 96) {
+            _serialInput += c;
+        }
+    }
+}
+
+void IotFeagri::processSerialCommand(String cmd) {
+    cmd.trim();
+    if (cmd.length() == 0) {
+        return;
+    }
+
+    Serial.printf("[Serial] Comando recebido: %s\n", cmd.c_str());
+
+    if (cmd == "help") {
+        Serial.println("--- iotFeagri CLI ---");
+        Serial.println("status        - Mostra WiFi, MQTT, heap e topicos principais");
+        Serial.println("config        - Mostra configuracao salva/carregada");
+        Serial.println("reboot        - Reinicia a placa");
+        Serial.println("open_portal   - Abre o captive portal em 192.168.4.1");
+        Serial.println("reset_config  - Apaga configuracao NVS e reinicia");
+        Serial.println("set_fw_host <host|default|reset> - Define servidor OTA");
+        Serial.println("---------------------");
+    } else if (cmd == "status") {
+        Serial.println("--- System Status ---");
+        Serial.printf("Uptime: %lu ms\n", millis());
+        Serial.printf("Free Heap: %u bytes\n", ESP.getFreeHeap());
+        Serial.printf("WiFi Status: %s\n",
+                      WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
+        }
+        Serial.printf("MQTT Status: %s\n",
+                      _mqttClient.connected() ? "CONNECTED" : "DISCONNECTED");
+        Serial.printf("MAC: %s\n", WiFi.macAddress().c_str());
+        Serial.printf("Client ID: %s\n", _deviceId.c_str());
+        Serial.printf("Group: %s\n", currentGroup().c_str());
+        Serial.printf("Portal: %s\n", _portalServer ? "ACTIVE" : "INACTIVE");
+        Serial.println("--- Topicos ---");
+        Serial.printf("Data: %s\n", mqttTopicData("temperature", _deviceId).c_str());
+        Serial.printf("Status: %s\n", mqttTopicStatus().c_str());
+        Serial.printf("Cmd: %s\n", mqttTopicCmd().c_str());
+        Serial.printf("Group Cmd: %s\n", mqttTopicGroupCmd().c_str());
+        Serial.println("---------------------");
+    } else if (cmd == "config") {
+        Serial.println("--- Configuration ---");
+        Serial.printf("MQTT Host: %s\n", _mqttBroker.c_str());
+        Serial.printf("MQTT Port: %d\n", _mqttPort);
+        Serial.printf("MQTT User: %s\n", _mqttUser.c_str());
+        Serial.printf("Owner/User: %s\n", _userId.c_str());
+        Serial.printf("Profile: %s\n", currentProfile().c_str());
+        Serial.printf("FW Version: %s\n", _fwVersion.c_str());
+        Serial.printf("FW Host: %s\n", _fwServer.length() > 0
+                                           ? _fwServer.c_str()
+                                           : "(Default: MQTT Host)");
+        Serial.printf("TLS: %s\n", _useTls ? "on" : "off");
+        Serial.println("---------------------");
+    } else if (cmd == "reboot") {
+        Serial.println("Reiniciando...");
+        delay(100);
+        ESP.restart();
+    } else if (cmd == "open_portal") {
+        Serial.println("Abrindo portal de configuracao...");
+        startPortal();
+    } else if (cmd == "reset_config") {
+        Serial.println("Apagando configuracao NVS...");
+        resetConfig();
+        Serial.println("Configuracao apagada. Reiniciando...");
+        delay(300);
+        ESP.restart();
+    } else if (cmd.startsWith("set_fw_host ")) {
+        String newHost = cmd.substring(12);
+        newHost.trim();
+        if (newHost == "default" || newHost == "reset") {
+            _fwServer = "";
+            Serial.println("FW Host resetado para padrao (Host MQTT)");
+        } else {
+            _fwServer = newHost;
+            Serial.printf("FW Host definido para: %s\n", _fwServer.c_str());
+        }
+        saveConfig();
+    } else {
+        Serial.println("Comando desconhecido. Digite 'help' para a lista.");
     }
 }
 
@@ -667,6 +891,30 @@ bool IotFeagri::publishStatus(const char* key, String value) {
     doc["profile"] = currentProfile();
     JsonObject data = doc["data"].to<JsonObject>();
     data[key] = value;
+
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+    String topic = mqttTopicStatus();
+    Serial.printf("[MQTT PUB] %s\n", topic.c_str());
+    return _mqttClient.publish(topic.c_str(), jsonStr.c_str());
+}
+
+bool IotFeagri::publishCommandStatus(const char* command, const char* status,
+                                     const String& message) {
+    if (!_mqttClient.connected()) return false;
+
+    JsonDocument doc;
+    doc["type"] = "COMMAND_STATUS";
+    doc["client_id"] = _deviceId;
+    doc["group"] = currentGroup();
+    doc["owner"] = _userId;
+    doc["profile"] = currentProfile();
+    doc["command"] = command;
+    doc["status"] = status;
+    doc["timestamp"] = getUnixTimeMs();
+    if (message.length() > 0) {
+        doc["message"] = message;
+    }
 
     String jsonStr;
     serializeJson(doc, jsonStr);
@@ -1094,11 +1342,16 @@ void IotFeagri::startConfigServer() {
     _portalServer = new WebServer(80);
     _portalServer->on("/", [this]() { this->handleRoot(); });
     _portalServer->on("/config", [this]() { this->handleRoot(); });
+    _portalServer->on("/login", HTTP_GET, [this]() { this->handleLoginPage(); });
+    _portalServer->on("/login", HTTP_POST, [this]() { this->handleLoginSubmit(); });
+    _portalServer->on("/logout", HTTP_GET, [this]() { this->handleLogout(); });
     _portalServer->on("/save", [this]() { this->handleSave(); });
     _portalServer->on("/update", HTTP_POST,
         [this]() { this->handleWebOtaDone(); },
         [this]() { this->handleWebOtaUpload(); });
     _portalServer->onNotFound([this]() { this->handleRoot(); });
+    const char* headerKeys[] = {"Cookie"};
+    _portalServer->collectHeaders(headerKeys, 1);
 
     _portalServer->begin();
     if (WiFi.status() == WL_CONNECTED) {
@@ -1107,7 +1360,77 @@ void IotFeagri::startConfigServer() {
     }
 }
 
+bool IotFeagri::webAuthCheckAndReply() {
+    if (_portalServer == nullptr) {
+        return false;
+    }
+
+    String cookie = _portalServer->header("Cookie");
+    String expected = "sid=" + _webSessionId;
+    if (_webSessionId.length() > 0 && millis() < _webSessionUntil &&
+        cookie.indexOf(expected) >= 0) {
+        return true;
+    }
+
+    _portalServer->sendHeader("Location", "/login", true);
+    _portalServer->send(302, "text/plain", "Redirecting");
+    return false;
+}
+
+void IotFeagri::handleLoginPage() {
+    String p;
+    p.reserve(1400);
+    p += "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
+    p += "<title>IoT FEAGRI - Login</title><style>";
+    p += "body{font-family:sans-serif;background:#f4f4f9;color:#333;margin:20px}.card{max-width:400px;margin:0 auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
+    p += "h2{color:#005a9c;text-align:center}label{display:block;margin:10px 0 5px;font-weight:bold}";
+    p += "input{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}";
+    p += "button{width:100%;padding:12px;background:#005a9c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:16px}";
+    p += "</style></head><body><div class='card'><h2>IoT FEAGRI</h2>";
+    p += "<form method='POST' action='/login'>";
+    p += "<label>Usuario</label><input name='user' type='text' autofocus>";
+    p += "<label>Senha</label><input name='pass' type='password'>";
+    p += "<button type='submit'>Entrar</button></form></div></body></html>";
+    _portalServer->send(200, "text/html", p);
+}
+
+void IotFeagri::handleLoginSubmit() {
+    String user = _portalServer->arg("user");
+    String pass = _portalServer->arg("pass");
+    user.trim();
+    pass.trim();
+
+    if (user == _webUser && pass == _webPass) {
+        char sid[17];
+        snprintf(sid, sizeof(sid), "%08X%08X", esp_random(), esp_random());
+        _webSessionId = sid;
+        _webSessionUntil = millis() + 30UL * 60UL * 1000UL;
+        _portalServer->sendHeader("Set-Cookie",
+                                  "sid=" + _webSessionId +
+                                      "; Max-Age=1800; Path=/; HttpOnly",
+                                  true);
+        _portalServer->sendHeader("Location", "/", true);
+        _portalServer->send(302, "text/plain", "Redirecting");
+        return;
+    }
+
+    _portalServer->send(401, "text/html",
+                        "<!DOCTYPE html><html><body><p>Usuario ou senha invalidos.</p><p><a href='/login'>Tentar novamente</a></p></body></html>");
+}
+
+void IotFeagri::handleLogout() {
+    _webSessionId = "";
+    _webSessionUntil = 0;
+    _portalServer->sendHeader("Set-Cookie", "sid=; Max-Age=0; Path=/; HttpOnly", true);
+    _portalServer->sendHeader("Location", "/login", true);
+    _portalServer->send(302, "text/plain", "Redirecting");
+}
+
 void IotFeagri::handleRoot() {
+    if (!webAuthCheckAndReply()) {
+        return;
+    }
+
     String p;
     p.reserve(3000);
     p += "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
@@ -1148,6 +1471,11 @@ void IotFeagri::handleRoot() {
     appendReadonlyTopic(p, "OTA comando legado", mqttTopicLegacyFirmwareCmd());
     appendReadonlyTopic(p, "OTA status legado", mqttTopicLegacyFirmwareStatus());
 
+    p += "<div class='section'>Seguranca do portal</div>";
+    p += "<label>Novo usuario web</label><input name='web_user' type='text' value='" + _webUser + "'>";
+    p += "<label>Nova senha web</label><input name='web_pass' type='password' placeholder='Nao alterar'>";
+    p += "<label>Confirmar senha web</label><input name='web_pass_conf' type='password' placeholder='Nao alterar'>";
+
     p += "<button type='submit'>Salvar e Conectar</button></form>";
     p += "<div class='section'>Atualizacao de firmware</div>";
     p += "<form method='POST' action='/update' enctype='multipart/form-data'>";
@@ -1158,6 +1486,10 @@ void IotFeagri::handleRoot() {
 }
 
 void IotFeagri::handleSave() {
+    if (!webAuthCheckAndReply()) {
+        return;
+    }
+
     _wifiPass = _portalServer->arg("w_pass");
     _mqttBroker = _portalServer->arg("m_host");
     _mqttPort = _portalServer->arg("m_port").toInt();
@@ -1172,6 +1504,29 @@ void IotFeagri::handleSave() {
     _fwServer = _portalServer->arg("fw_s");
     _useTls = _portalServer->hasArg("tls");
 
+    String webUser = _portalServer->arg("web_user");
+    String webPass = _portalServer->arg("web_pass");
+    String webConf = _portalServer->arg("web_pass_conf");
+    webUser.trim();
+    webPass.trim();
+    webConf.trim();
+    if (webUser.length() > 0) {
+        _webUser = webUser;
+    }
+    if (webPass.length() > 0 || webConf.length() > 0) {
+        if (webPass != webConf) {
+            _portalServer->send(400, "text/plain", "Senha web e confirmacao nao conferem.");
+            return;
+        }
+        if (webPass.length() < 4) {
+            _portalServer->send(400, "text/plain", "Senha web deve ter pelo menos 4 caracteres.");
+            return;
+        }
+        _webPass = webPass;
+        _webSessionId = "";
+        _webSessionUntil = 0;
+    }
+
     saveConfig();
 
     _portalServer->send(200, "text/plain", "Configuracoes salvas! Reiniciando...");
@@ -1180,6 +1535,10 @@ void IotFeagri::handleSave() {
 }
 
 void IotFeagri::handleWebOtaUpload() {
+    if (!webAuthCheckAndReply()) {
+        return;
+    }
+
     HTTPUpload& upload = _portalServer->upload();
 
     if (upload.status == UPLOAD_FILE_START) {
@@ -1232,6 +1591,10 @@ void IotFeagri::handleWebOtaUpload() {
 }
 
 void IotFeagri::handleWebOtaDone() {
+    if (!webAuthCheckAndReply()) {
+        return;
+    }
+
     if (_webOtaWritten == 0 && _webOtaError.length() == 0) {
         _webOtaError = "Nenhum arquivo recebido";
     }

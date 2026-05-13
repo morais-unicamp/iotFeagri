@@ -101,6 +101,12 @@ O campo `Servidor de firmware` do portal e opcional. Quando fica vazio, a biblio
 
 Alterar o `Perfil do projeto` muda o `group` e, por consequencia, muda o `client_id` e os topicos automaticos. Apos salvar, a placa reinicia e recalcula esses valores no boot seguinte.
 
+O portal de configuracao e protegido por login. O padrao inicial e:
+- usuario: `admin`
+- senha: `admin`
+
+Essas credenciais podem ser alteradas na secao `Seguranca do portal` da pagina de configuracao. Tambem podem ser atualizadas por MQTT com os comandos `set_web_auth`, `set_web_credentials` ou `set_portal_credentials`. O comando aceita `user` e `pass` no JSON, ou um unico argumento em `value` no formato `usuario senha` ou `usuario:senha`, por exemplo `admin 1234`. A senha nao e exibida em status ou consultas.
+
 A biblioteca tambem assina comandos por grupo no formato:
 - `feagri/<user>/groups/<group>/cmd`
 
@@ -199,6 +205,46 @@ A pagina de configuracao inclui uma secao `Atualizacao de firmware` para upload 
 Esse fluxo usa `Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)`, valida os bytes escritos contra o tamanho recebido pelo upload, finaliza com `Update.end(true)` e reinicia a placa em caso de sucesso. Durante o Web OTA, a biblioteca pausa MQTT/heartbeat e mantem o servidor HTTP processando o upload.
 
 Use Web OTA para testes locais e recuperacao rapida de placas em bancada. Para atualizacoes coordenadas de frota, prefira o fluxo OTA via dashboard/MQTT.
+
+### Console serial
+
+A biblioteca processa comandos pela Serial dentro de `node.loop()`. Abra o monitor serial em `115200` baud e digite `help`.
+
+Comandos disponiveis:
+- `help`: lista comandos.
+- `status`: mostra uptime, heap, WiFi, MQTT, `client_id`, grupo e topicos principais.
+- `config`: mostra host/porta MQTT, usuario, perfil, versao e servidor OTA.
+- `reboot`: reinicia a placa.
+- `open_portal`: abre o captive portal em `192.168.4.1`.
+- `reset_config`: apaga a configuracao NVS da biblioteca e reinicia.
+- `set_fw_host <host>`: define servidor de firmware.
+- `set_fw_host default` ou `set_fw_host reset`: volta o servidor de firmware para o padrao, usando o Host MQTT.
+
+Comandos MQTT comuns ja tratados pela biblioteca antes do callback do usuario:
+
+| Comando | Argumento | Acao |
+| --- | --- | --- |
+| `UPDATE` | opcional | Inicia OTA via dashboard/MQTT. |
+| `update_firmware` | opcional | Inicia OTA via dashboard/MQTT. |
+| `trigger_update` | opcional | Inicia OTA via dashboard/MQTT. |
+| `set_fw_host` | `host`, `default` ou `reset` | Define ou limpa o servidor de firmware. |
+| `set_firmware_host` | `host`, `default` ou `reset` | Alias de `set_fw_host`. |
+| `get_fw_host` | vazio | Publica o servidor de firmware atual no status. |
+| `get_firmware_host` | vazio | Alias de `get_fw_host`. |
+| `set_firmware_version` | versao | Salva a versao de firmware reportada. |
+| `set_fw_version` | versao | Alias de `set_firmware_version`. |
+| `get_firmware_version` | vazio | Publica a versao atual em `FW_STATUS`. |
+| `get_fw_version` | vazio | Alias de `get_firmware_version`. |
+| `reboot` | vazio | Reinicia a placa. |
+| `status` | vazio | Publica WiFi, MQTT, heap e IP no status. |
+| `config` | vazio | Publica resumo de configuracao no status. |
+| `open_portal` | vazio | Abre o captive portal em `192.168.4.1`. |
+| `close_portal` | vazio | Fecha o captive portal e volta para STA. |
+| `set_web_auth` | `usuario senha` ou `usuario:senha` | Altera credenciais do portal. |
+| `set_web_credentials` | `usuario senha` ou `usuario:senha` | Alias de `set_web_auth`. |
+| `set_portal_credentials` | `usuario senha` ou `usuario:senha` | Alias de `set_web_auth`. |
+
+O comando `reset_config` fica restrito ao console serial e nao e executado por MQTT.
 
 ---
 

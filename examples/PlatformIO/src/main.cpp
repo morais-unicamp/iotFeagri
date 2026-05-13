@@ -83,9 +83,9 @@ void setup() {
 void loop() {
   node.loop();
 
-  // Publica uma temperatura fake a cada 10 segundos.
+  // Publica uma temperatura fake a cada 30 segundos.
   static unsigned long lastMsg = 0;
-  if (millis() - lastMsg > 10000) {
+  if (millis() - lastMsg > 30000) {
     lastMsg = millis();
     float valorTemp = random(200, 300) / 10.0;
     node.publish("temperature", valorTemp);

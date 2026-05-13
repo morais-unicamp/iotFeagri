@@ -81,6 +81,10 @@ private:
     String _wifiPass;
     String _fwServer;
     bool _useTls;
+    String _webUser;
+    String _webPass;
+    String _webSessionId;
+    unsigned long _webSessionUntil;
     
     String _deviceId;
     String _fwVersion;
@@ -104,6 +108,8 @@ private:
     DNSServer* _dnsServer;
     bool _portalActive;
     unsigned long _portalStartedAt;
+    String _serialInput;
+    bool _serialCliReady;
 
     unsigned long _lastReconnectAttempt;
     unsigned long _lastWiFiAttempt;
@@ -120,6 +126,11 @@ private:
     bool publishPendingFirmwareStatus();
     void clearPendingFirmwareStatus();
     void setupIdentityAndTopics();
+    bool publishCommandStatus(const char* command, const char* status,
+                              const String& message = "");
+    void resetConfig();
+    void handleSerialInput();
+    void processSerialCommand(String cmd);
 
     // WiFi & Portal
     bool connectWiFi(bool allowPortalFallback = false);
@@ -128,6 +139,10 @@ private:
     void handlePortal();
     void handleRoot();
     void handleSave();
+    bool webAuthCheckAndReply();
+    void handleLoginPage();
+    void handleLoginSubmit();
+    void handleLogout();
     void handleWebOtaUpload();
     void handleWebOtaDone();
 

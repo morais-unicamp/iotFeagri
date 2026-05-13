@@ -79,9 +79,9 @@ void loop() {
   // Mantem a conexao ativa e processa Portal, MQTT, OTA e heartbeat.
   node.loop();
 
-  // Publica uma temperatura fake a cada 10 segundos.
+  // Publica uma temperatura fake a cada 30 segundos.
   static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate > 10000) {
+  if (millis() - lastUpdate > 30000) {
     lastUpdate = millis();
     float valorSorteado = 20.0 + (random(0, 100) / 10.0);
     node.publish("temperature", valorSorteado);
