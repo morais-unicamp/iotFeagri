@@ -59,6 +59,17 @@ private:
     String defaultProfile() const;
     String currentProfile() const;
     String currentGroup() const;
+    String mqttTopicDeviceBase() const;
+    String mqttTopicCmd() const;
+    String mqttTopicGroupCmd() const;
+    String mqttTopicStatus() const;
+    String mqttTopicData() const;
+    String mqttTopicData(const String& sensorType, const String& serialOrId) const;
+    String mqttTopicHeartbeat() const;
+    String mqttTopicLegacyFirmwareCmd() const;
+    String mqttTopicLegacyFirmwareStatus() const;
+    String mqttTopicUserFirmwareCmd() const;
+    String mqttTopicUserFirmwareStatus() const;
 
     // Configurações
     String _userId;
@@ -73,12 +84,6 @@ private:
     
     String _deviceId;
     String _fwVersion;
-    String _topicPub;
-    String _topicSub;
-    String _topicGroupCmd;
-    String _topicStatus;
-    String _topicFwCmd;
-    String _topicFwStatus;
     String _topicRtcReq;
     String _topicRtcResp;
 
@@ -91,6 +96,8 @@ private:
     bool _mqttAllowInsecure;
     bool _firmwareAllowInsecure;
     bool _otaActive;
+    String _webOtaError;
+    size_t _webOtaWritten;
 
     // Portal & DNS
     WebServer* _portalServer;
@@ -116,10 +123,13 @@ private:
 
     // WiFi & Portal
     bool connectWiFi(bool allowPortalFallback = false);
+    void startConfigServer();
     void startPortal();
     void handlePortal();
     void handleRoot();
     void handleSave();
+    void handleWebOtaUpload();
+    void handleWebOtaDone();
 
     bool connectMQTT();
     void configureMqttTransport();

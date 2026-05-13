@@ -129,6 +129,14 @@ bool matchesGroup(const char* group, const String& userId, const String& groupId
     return strcmp(group, "todos") == 0 || strcmp(group, "all") == 0 ||
            userId.equalsIgnoreCase(group) || groupId.equalsIgnoreCase(group);
 }
+
+void appendReadonlyTopic(String& page, const String& label, const String& topic) {
+    page += "<label>";
+    page += label;
+    page += "</label><input type='text' readonly value='";
+    page += topic;
+    page += "'>";
+}
 }
 
 IotFeagri* _instance = nullptr;
@@ -153,6 +161,7 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _mqttAllowInsecure = true;
     _firmwareAllowInsecure = false;
     _otaActive = false;
+    _webOtaWritten = 0;
 }
 
 String IotFeagri::defaultProfile() const {
@@ -182,6 +191,62 @@ String IotFeagri::currentGroup() const {
     return user + "_" + profile;
 }
 
+String IotFeagri::mqttTopicDeviceBase() const {
+    return "feagri/" + _userId + "/devices/" + _deviceId;
+}
+
+String IotFeagri::mqttTopicCmd() const {
+    return mqttTopicDeviceBase() + "/cmd";
+}
+
+String IotFeagri::mqttTopicGroupCmd() const {
+    return "feagri/" + _userId + "/groups/" + currentGroup() + "/cmd";
+}
+
+String IotFeagri::mqttTopicStatus() const {
+    return mqttTopicDeviceBase() + "/status";
+}
+
+String IotFeagri::mqttTopicData() const {
+    return mqttTopicDeviceBase() + "/data";
+}
+
+String IotFeagri::mqttTopicData(const String& sensorType, const String& serialOrId) const {
+    String type = sensorType;
+    type.trim();
+    if (type.length() == 0) {
+        type = "sensor";
+    }
+
+    String serial = serialOrId;
+    serial.trim();
+    if (serial.length() == 0) {
+        serial = _deviceId;
+    }
+
+    return mqttTopicData() + "/" + type + "/" + serial;
+}
+
+String IotFeagri::mqttTopicHeartbeat() const {
+    return mqttTopicDeviceBase() + "/heartbeat";
+}
+
+String IotFeagri::mqttTopicLegacyFirmwareCmd() const {
+    return "feagri/firmware/update/cmd";
+}
+
+String IotFeagri::mqttTopicLegacyFirmwareStatus() const {
+    return "feagri/firmware/update/status";
+}
+
+String IotFeagri::mqttTopicUserFirmwareCmd() const {
+    return "feagri/" + _userId + "/firmware/update/cmd";
+}
+
+String IotFeagri::mqttTopicUserFirmwareStatus() const {
+    return "feagri/" + _userId + "/firmware/update/status";
+}
+
 void IotFeagri::setupIdentityAndTopics() {
     uint64_t chipId = ESP.getEfuseMac();
     char suffix[7];
@@ -189,12 +254,6 @@ void IotFeagri::setupIdentityAndTopics() {
              (unsigned int)(chipId & 0xFFFFFFULL));
     _deviceId = currentGroup() + "_" + String(suffix);
 
-    _topicPub = "feagri/" + _userId + "/devices/" + _deviceId + "/data";
-    _topicSub = "feagri/" + _userId + "/devices/" + _deviceId + "/cmd";
-    _topicGroupCmd = "feagri/" + _userId + "/groups/" + currentGroup() + "/cmd";
-    _topicStatus = "feagri/" + _userId + "/devices/" + _deviceId + "/status";
-    _topicFwCmd = "feagri/firmware/update/cmd";
-    _topicFwStatus = "feagri/firmware/update/status";
     _topicRtcReq = "feagri/rtc/requisicao";
     _topicRtcResp = "feagri/rtc/resposta";
 }
@@ -291,7 +350,9 @@ void IotFeagri::begin() {
     configTime(0, 0, "pool.ntp.org", "time.google.com");
     setupIdentityAndTopics();
 
-    connectWiFi(true);
+    if (connectWiFi(true)) {
+        startConfigServer();
+    }
 
     configureMqttTransport();
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
@@ -316,7 +377,9 @@ void IotFeagri::begin(const char* mqtt_broker, int mqtt_port, const char* mqtt_u
 
     setupIdentityAndTopics();
 
-    connectWiFi(true);
+    if (connectWiFi(true)) {
+        startConfigServer();
+    }
     configureMqttTransport();
     _mqttClient.setServer(_mqttBroker.c_str(), _mqttPort);
     _mqttClient.setBufferSize(4096);
@@ -378,9 +441,14 @@ bool IotFeagri::connectMQTT() {
     Serial.print("Connecting to MQTT...");
     if (_mqttClient.connect(_deviceId.c_str(), _mqttUser.c_str(), _mqttPass.c_str())) {
         Serial.println("OK");
-        _mqttClient.subscribe(_topicSub.c_str());
-        _mqttClient.subscribe(_topicGroupCmd.c_str());
-        _mqttClient.subscribe(_topicFwCmd.c_str());
+        String cmdTopic = mqttTopicCmd();
+        String groupCmdTopic = mqttTopicGroupCmd();
+        String legacyFwCmdTopic = mqttTopicLegacyFirmwareCmd();
+        String userFwCmdTopic = mqttTopicUserFirmwareCmd();
+        _mqttClient.subscribe(cmdTopic.c_str());
+        _mqttClient.subscribe(groupCmdTopic.c_str());
+        _mqttClient.subscribe(legacyFwCmdTopic.c_str());
+        _mqttClient.subscribe(userFwCmdTopic.c_str());
         _mqttClient.subscribe(_topicRtcResp.c_str());
         publishFwStatus("boot", "online");
         publishPendingFirmwareStatus();
@@ -406,14 +474,20 @@ void IotFeagri::configureMqttTransport() {
 }
 
 void IotFeagri::loop() {
+    if (_portalServer != nullptr) {
+        if (_portalActive && _dnsServer != nullptr) {
+            _dnsServer->processNextRequest();
+        }
+        // Web OTA precisa continuar atendendo HTTP enquanto MQTT/heartbeat pausam.
+        _portalServer->handleClient();
+    }
+
     if (_otaActive) {
         delay(10);
         return;
     }
 
     if (_portalActive) {
-        _dnsServer->processNextRequest();
-        _portalServer->handleClient();
         return;
     }
 
@@ -422,6 +496,8 @@ void IotFeagri::loop() {
         if (_portalActive) {
             return;
         }
+    } else if (_portalServer == nullptr) {
+        startConfigServer();
     }
 
     if (!_mqttClient.connected()) {
@@ -472,7 +548,7 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     const char* type = doc["type"];
     const char* cmd = doc["command"];
     const char* target = doc["target_id"] | doc["target"] | "";
-    const bool isGroupTopic = topicStr == _topicGroupCmd;
+    const bool isGroupTopic = topicStr == mqttTopicGroupCmd();
     const String groupId = currentGroup();
     String targetText = target;
     String targetLower = lowerTrimmed(targetText);
@@ -544,7 +620,9 @@ bool IotFeagri::publish(const char* grandeur, float value) {
 
     String jsonStr;
     serializeJson(doc, jsonStr);
-    return _mqttClient.publish(_topicPub.c_str(), jsonStr.c_str());
+    String topic = mqttTopicData(String(grandeur), _deviceId);
+    Serial.printf("[MQTT PUB] %s\n", topic.c_str());
+    return _mqttClient.publish(topic.c_str(), jsonStr.c_str());
 }
 
 bool IotFeagri::publish(const char* grandeur, int value) {
@@ -565,7 +643,9 @@ bool IotFeagri::publish(const char* grandeur, String value) {
 
     String jsonStr;
     serializeJson(doc, jsonStr);
-    return _mqttClient.publish(_topicPub.c_str(), jsonStr.c_str());
+    String topic = mqttTopicData(String(grandeur), _deviceId);
+    Serial.printf("[MQTT PUB] %s\n", topic.c_str());
+    return _mqttClient.publish(topic.c_str(), jsonStr.c_str());
 }
 
 bool IotFeagri::publishStatus(const char* key, bool value) {
@@ -590,7 +670,9 @@ bool IotFeagri::publishStatus(const char* key, String value) {
 
     String jsonStr;
     serializeJson(doc, jsonStr);
-    return _mqttClient.publish(_topicStatus.c_str(), jsonStr.c_str());
+    String topic = mqttTopicStatus();
+    Serial.printf("[MQTT PUB] %s\n", topic.c_str());
+    return _mqttClient.publish(topic.c_str(), jsonStr.c_str());
 }
 
 void IotFeagri::setFirmwareVersion(const char* version) {
@@ -620,7 +702,7 @@ void IotFeagri::onCommand(CommandCallback callback) {
 void IotFeagri::sendHeartbeat() {
     if (!_mqttClient.connected()) return;
 
-    String hbTopic = String("feagri/") + _userId + "/devices/" + _deviceId + "/heartbeat";
+    String hbTopic = mqttTopicHeartbeat();
 
     JsonDocument doc;
     doc["type"] = "heartbeat";
@@ -636,6 +718,7 @@ void IotFeagri::sendHeartbeat() {
 
     String payload;
     serializeJson(doc, payload);
+    Serial.printf("[MQTT PUB] %s\n", hbTopic.c_str());
     _mqttClient.publish(hbTopic.c_str(), payload.c_str());
 }
 
@@ -647,6 +730,7 @@ void IotFeagri::requestTimeSync() {
 
     String out;
     serializeJson(doc, out);
+    Serial.printf("[MQTT PUB] %s\n", _topicRtcReq.c_str());
     _mqttClient.publish(_topicRtcReq.c_str(), out.c_str());
 }
 
@@ -682,9 +766,14 @@ bool IotFeagri::publishFwStatusDetail(const char* state, const String& message,
 
     String jsonStr;
     serializeJson(doc, jsonStr);
-    bool ok = _mqttClient.publish(_topicFwStatus.c_str(), jsonStr.c_str());
+    String legacyTopic = mqttTopicLegacyFirmwareStatus();
+    String userTopic = mqttTopicUserFirmwareStatus();
+    Serial.printf("[MQTT PUB] %s\n", legacyTopic.c_str());
+    bool legacyOk = _mqttClient.publish(legacyTopic.c_str(), jsonStr.c_str());
+    Serial.printf("[MQTT PUB] %s\n", userTopic.c_str());
+    bool userOk = _mqttClient.publish(userTopic.c_str(), jsonStr.c_str());
     _mqttClient.loop();
-    return ok;
+    return legacyOk || userOk;
 }
 
 void IotFeagri::waitOtaStagger(const char* reason) {
@@ -750,9 +839,23 @@ bool IotFeagri::downloadFirmwareOnce(const String& fwUrl, const String& md5,
         return false;
     }
     if (!Update.begin((size_t)len, U_FLASH)) {
-        err = "Update.begin failed: " + String(Update.errorString());
-        http.end();
-        return false;
+        String firstErr = Update.errorString();
+        Serial.printf("Update.begin(%d) failed: %s. Retrying with UPDATE_SIZE_UNKNOWN.\n",
+                      len, firstErr.c_str());
+        publishFwStatusDetail("begin_retry",
+                              "Update.begin(size) failed: " + firstErr,
+                              -1, 0, len, fwUrl);
+        Update.abort();
+        if (md5.length() > 0 && !Update.setMD5(md5.c_str())) {
+            err = "MD5 esperado invalido apos retry";
+            http.end();
+            return false;
+        }
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+            err = "Update.begin fallback failed: " + String(Update.errorString());
+            http.end();
+            return false;
+        }
     }
 
     WiFiClient* stream = http.getStreamPtr();
@@ -965,8 +1068,6 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
 void IotFeagri::startPortal() {
     _portalActive = true;
     _portalStartedAt = millis();
-    _dnsServer = new DNSServer();
-    _portalServer = new WebServer(80);
 
     uint64_t chipId = ESP.getEfuseMac();
     char ssid[32];
@@ -976,14 +1077,34 @@ void IotFeagri::startPortal() {
     WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
     WiFi.softAP(ssid);
 
+    if (_dnsServer == nullptr) {
+        _dnsServer = new DNSServer();
+    }
     _dnsServer->start(53, "*", IPAddress(192, 168, 4, 1));
 
+    startConfigServer();
+    Serial.printf("Portal Ativo! Conecte em: %s (IP 192.168.4.1)\n", ssid);
+}
+
+void IotFeagri::startConfigServer() {
+    if (_portalServer != nullptr) {
+        return;
+    }
+
+    _portalServer = new WebServer(80);
     _portalServer->on("/", [this]() { this->handleRoot(); });
+    _portalServer->on("/config", [this]() { this->handleRoot(); });
     _portalServer->on("/save", [this]() { this->handleSave(); });
+    _portalServer->on("/update", HTTP_POST,
+        [this]() { this->handleWebOtaDone(); },
+        [this]() { this->handleWebOtaUpload(); });
     _portalServer->onNotFound([this]() { this->handleRoot(); });
 
     _portalServer->begin();
-    Serial.printf("Portal Ativo! Conecte em: %s (IP 192.168.4.1)\n", ssid);
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.print("Config web ativo em http://");
+        Serial.println(WiFi.localIP());
+    }
 }
 
 void IotFeagri::handleRoot() {
@@ -993,7 +1114,7 @@ void IotFeagri::handleRoot() {
     p += "<title>IoT FEAGRI - Config</title><style>";
     p += "body{font-family:sans-serif;background:#f4f4f9;color:#333;margin:20px}.card{max-width:400px;margin:0 auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
     p += "h2{color:#005a9c;text-align:center}label{display:block;margin:10px 0 5px;font-weight:bold}";
-    p += "input[type=text],input[type=password],input[type=number]{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}";
+    p += "input[type=text],input[type=password],input[type=number],input[type=file]{width:100%;padding:10px;margin-bottom:15px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}";
     p += "button{width:100%;padding:12px;background:#005a9c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:16px}";
     p += "button:hover{background:#00467a}.section{border-bottom:2px solid #005a9c;margin-bottom:20px;padding-bottom:5px;font-size:18px;margin-top:20px}";
     p += "</style></head><body><div class='card'><h2>Configuracao IoT FEAGRI</h2>";
@@ -1015,7 +1136,24 @@ void IotFeagri::handleRoot() {
     p += "<label style='display:flex;align-items:center;gap:10px;margin-bottom:20px'>";
     p += "<input type='checkbox' name='tls' " + String(_useTls ? "checked" : "") + "> Usar TLS (HTTPS / Porta 8883)</label>";
 
-    p += "<button type='submit'>Salvar e Conectar</button></form></div></body></html>";
+    p += "<div class='section'>Topicos MQTT automaticos</div>";
+    appendReadonlyTopic(p, "Base do dispositivo", mqttTopicDeviceBase());
+    appendReadonlyTopic(p, "Comandos do dispositivo", mqttTopicCmd());
+    appendReadonlyTopic(p, "Comandos do grupo", mqttTopicGroupCmd());
+    appendReadonlyTopic(p, "Dados de sensores", mqttTopicData("temperature", _deviceId));
+    appendReadonlyTopic(p, "Status/ACK", mqttTopicStatus());
+    appendReadonlyTopic(p, "Heartbeat", mqttTopicHeartbeat());
+    appendReadonlyTopic(p, "OTA comando por usuario", mqttTopicUserFirmwareCmd());
+    appendReadonlyTopic(p, "OTA status por usuario", mqttTopicUserFirmwareStatus());
+    appendReadonlyTopic(p, "OTA comando legado", mqttTopicLegacyFirmwareCmd());
+    appendReadonlyTopic(p, "OTA status legado", mqttTopicLegacyFirmwareStatus());
+
+    p += "<button type='submit'>Salvar e Conectar</button></form>";
+    p += "<div class='section'>Atualizacao de firmware</div>";
+    p += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+    p += "<label>Arquivo .bin</label><input type='file' name='update' accept='.bin,application/octet-stream'>";
+    p += "<button type='submit'>Atualizar firmware</button></form>";
+    p += "</div></body></html>";
     _portalServer->send(200, "text/html", p);
 }
 
@@ -1039,4 +1177,70 @@ void IotFeagri::handleSave() {
     _portalServer->send(200, "text/plain", "Configuracoes salvas! Reiniciando...");
     delay(2000);
     ESP.restart();
+}
+
+void IotFeagri::handleWebOtaUpload() {
+    HTTPUpload& upload = _portalServer->upload();
+
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("[WEB_OTA] Inicio: %s\n", upload.filename.c_str());
+        _webOtaError = "";
+        _webOtaWritten = 0;
+        _otaActive = true;
+        if (_mqttClient.connected()) {
+            _mqttClient.disconnect();
+        }
+        if (Update.isRunning()) {
+            Update.abort();
+        }
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+            _webOtaError = "Update.begin falhou: " + String(Update.errorString());
+            Serial.println("[WEB_OTA] " + _webOtaError);
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (_webOtaError.length() > 0) {
+            return;
+        }
+        size_t written = Update.write(upload.buf, upload.currentSize);
+        if (written != upload.currentSize) {
+            _webOtaError = "Update.write falhou: " + String(Update.errorString());
+            Serial.println("[WEB_OTA] " + _webOtaError);
+            return;
+        }
+        _webOtaWritten += written;
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (_webOtaError.length() == 0 && _webOtaWritten != upload.totalSize) {
+            _webOtaError = "Upload incompleto (" + String(_webOtaWritten) +
+                           "/" + String(upload.totalSize) + ")";
+        }
+        if (_webOtaError.length() == 0 && !Update.end(true)) {
+            _webOtaError = "Update.end falhou: " + String(Update.errorString());
+        }
+        if (_webOtaError.length() > 0) {
+            Update.abort();
+            Serial.println("[WEB_OTA] " + _webOtaError);
+        } else {
+            Serial.printf("[WEB_OTA] Concluido: %u bytes\n",
+                          (unsigned)_webOtaWritten);
+        }
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        _webOtaError = "Upload abortado";
+        Update.abort();
+        _otaActive = false;
+        Serial.println("[WEB_OTA] Upload abortado");
+    }
+}
+
+void IotFeagri::handleWebOtaDone() {
+    if (_webOtaWritten == 0 && _webOtaError.length() == 0) {
+        _webOtaError = "Nenhum arquivo recebido";
+    }
+    bool ok = _webOtaError.length() == 0 && !Update.hasError();
+    String body = ok ? "OTA OK. Reiniciando..." : "OTA falhou: " + _webOtaError;
+    _portalServer->send(ok ? 200 : 500, "text/plain", body);
+    _otaActive = false;
+    if (ok) {
+        delay(500);
+        ESP.restart();
+    }
 }

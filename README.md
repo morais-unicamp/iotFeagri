@@ -18,8 +18,10 @@ O usuário pode alterar o `profile` no portal para separar projetos diferentes s
 
 ## 🌟 Principais Recursos
 - **Provisionamento via Portal**: Configure Rede WiFi e Credenciais MQTT via celular (Captive Portal em `192.168.4.1`).
+- **Portal no IP da placa**: depois de conectada ao WiFi, a placa mantem a pagina de configuracao em `http://<IP_DA_PLACA>/` e `http://<IP_DA_PLACA>/config`.
 - **Persistência NVS**: Credenciais são salvas permanentemente na memória do ESP32.
 - **Auto-OTA**: Atualização de firmware automática via Dashboard.
+- **Web OTA local**: upload manual de `.bin` pela propria pagina de configuracao da placa.
 - **Suporte Multi-IDE**: Templates prontos para **Arduino IDE** e **PlatformIO (VS Code)**.
 - **Sincronização de Tempo**: Relógio interno (RTC) sincronizado automaticamente com os servidores da FEAGRI.
 
@@ -95,6 +97,10 @@ Para manter compatibilidade com uploads antigos, a biblioteca tambem tenta como 
 
 Isso evita colisão entre usuários e também separa projetos distintos do mesmo usuário.
 
+O campo `Servidor de firmware` do portal e opcional. Quando fica vazio, a biblioteca usa o `Host do broker` como servidor base do OTA. Para o host `leandro144.feagri.unicamp.br`, a biblioteca monta a URL de firmware com `https://` automaticamente. Preencha esse campo apenas quando o firmware estiver em outro servidor, ou quando for necessario forcar explicitamente `http://` ou `https://`.
+
+Alterar o `Perfil do projeto` muda o `group` e, por consequencia, muda o `client_id` e os topicos automaticos. Apos salvar, a placa reinicia e recalcula esses valores no boot seguinte.
+
 A biblioteca tambem assina comandos por grupo no formato:
 - `feagri/<user>/groups/<group>/cmd`
 
@@ -128,6 +134,28 @@ A dashboard identifica o grupo a partir do `client_id` no formato:
 - `<group>_<MAC6>`
 
 Ou seja, ela remove o sufixo final `_XXXXXX` e usa o restante como grupo do dispositivo.
+
+### Topicos MQTT automaticos
+
+A biblioteca nao persiste topicos MQTT configuraveis na NVS. Os topicos sao calculados a partir de `user`, `profile`, `group` e `client_id`.
+
+Padrao dos topicos:
+- Base do dispositivo: `feagri/<user>/devices/<client_id>`
+- Comando individual: `feagri/<user>/devices/<client_id>/cmd`
+- Comando de grupo: `feagri/<user>/groups/<group>/cmd`
+- Dados de sensores: `feagri/<user>/devices/<client_id>/data/<tipo_sensor>/<serial_ou_id>`
+- Status/ACK: `feagri/<user>/devices/<client_id>/status`
+- Heartbeat: `feagri/<user>/devices/<client_id>/heartbeat`
+
+Na API atual, `publish("temperature", valor)` usa o nome informado como `<tipo_sensor>` e o proprio `client_id` como fallback de `<serial_ou_id>`.
+
+Para OTA MQTT, a biblioteca mantem compatibilidade com os topicos globais legados:
+- `feagri/firmware/update/cmd`
+- `feagri/firmware/update/status`
+
+Ela tambem ja assina/publica os topicos por usuario, preparando a migracao futura:
+- `feagri/<user>/firmware/update/cmd`
+- `feagri/<user>/firmware/update/status`
 
 ### Upload pela dashboard
 
@@ -163,6 +191,14 @@ Isso permite que a dashboard detecte corretamente o grupo e grave o `manifest.js
 - nome do arquivo enviado
 - grupo do dispositivo
 - prefixo do `client_id`
+
+### Web OTA local
+
+A pagina de configuracao inclui uma secao `Atualizacao de firmware` para upload manual de arquivo `.bin`.
+
+Esse fluxo usa `Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)`, valida os bytes escritos contra o tamanho recebido pelo upload, finaliza com `Update.end(true)` e reinicia a placa em caso de sucesso. Durante o Web OTA, a biblioteca pausa MQTT/heartbeat e mantem o servidor HTTP processando o upload.
+
+Use Web OTA para testes locais e recuperacao rapida de placas em bancada. Para atualizacoes coordenadas de frota, prefira o fluxo OTA via dashboard/MQTT.
 
 ---
 
