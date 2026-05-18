@@ -100,6 +100,8 @@ private:
     bool _mqttAllowInsecure;
     bool _firmwareAllowInsecure;
     bool _otaActive;
+    TaskHandle_t _otaTaskHandle;
+    bool _otaTaskNeedsStagger;
     String _webOtaError;
     size_t _webOtaWritten;
 
@@ -152,6 +154,8 @@ private:
     void handleMqttMessage(char* topic, byte* payload, unsigned int length);
     
     // OTA Pull Logic
+    bool queueFirmwareUpdate(bool commandNeedsStagger);
+    static void otaTaskEntry(void* arg);
     void performUpdate(bool commandNeedsStagger = false);
     bool publishFwStatus(const char* state, const char* message = "");
     bool publishFwStatusDetail(const char* state, const String& message,

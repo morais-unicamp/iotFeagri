@@ -185,6 +185,8 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _mqttAllowInsecure = true;
     _firmwareAllowInsecure = false;
     _otaActive = false;
+    _otaTaskHandle = nullptr;
+    _otaTaskNeedsStagger = false;
     _webOtaWritten = 0;
     _serialCliReady = false;
     _webUser = "admin";
@@ -493,15 +495,13 @@ bool IotFeagri::connectMQTT() {
         Serial.println("OK");
         String cmdTopic = mqttTopicCmd();
         String groupCmdTopic = mqttTopicGroupCmd();
-        String legacyFwCmdTopic = mqttTopicLegacyFirmwareCmd();
         String userFwCmdTopic = mqttTopicUserFirmwareCmd();
         _mqttClient.subscribe(cmdTopic.c_str());
         _mqttClient.subscribe(groupCmdTopic.c_str());
-        _mqttClient.subscribe(legacyFwCmdTopic.c_str());
         _mqttClient.subscribe(userFwCmdTopic.c_str());
         _mqttClient.subscribe(_topicRtcResp.c_str());
-        publishFwStatus("boot", "online");
         publishPendingFirmwareStatus();
+        publishFwStatus("boot", "online");
         sendHeartbeat();
         _lastHeartbeatTime = millis();
         requestTimeSync();
@@ -600,20 +600,32 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     const char* type = doc["type"];
     const char* cmd = doc["command"];
     const char* target = doc["target_id"] | doc["target"] | "";
+    const char* owner = doc["owner"] | "";
     const bool isGroupTopic = topicStr == mqttTopicGroupCmd();
     const String groupId = currentGroup();
     String targetText = target;
     String targetLower = lowerTrimmed(targetText);
     String clientLower = lowerTrimmed(_deviceId);
     String groupLower = lowerTrimmed(groupId);
+    String ownerLower = lowerTrimmed(String(owner));
+    String userLower = lowerTrimmed(_userId);
+
+    if (ownerLower.length() > 0 && ownerLower != userLower) {
+        return;
+    }
 
     if (targetLower.length() > 0 && targetLower != clientLower &&
-        !isGlobalTarget(targetLower.c_str()) && targetLower != groupLower) {
+        !isGlobalTarget(targetLower.c_str()) && targetLower != groupLower &&
+        targetLower != "grupo" && targetLower != "group") {
         return;
     }
 
     const char* group = doc["group"] | "";
-    if ((isGlobalTarget(target) || isGroupTopic) && !matchesGroup(group, _userId, groupId)) {
+    const bool collectiveTarget =
+        targetLower.length() == 0 || isGlobalTarget(targetLower.c_str()) ||
+        targetLower == groupLower || targetLower == "grupo" ||
+        targetLower == "group" || isGroupTopic;
+    if (collectiveTarget && !matchesGroup(group, _userId, groupId)) {
         return;
     }
 
@@ -621,14 +633,23 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
         String command = cmd ? String(cmd) : "";
         String commandLower = lowerTrimmed(command);
         if (command == "UPDATE" || commandLower == "update_firmware" ||
+            commandLower == "update_fw" ||
             commandLower == "trigger_update") {
             String groupCommand = lowerTrimmed(String(group));
             bool commandNeedsStagger =
                 targetLower.length() == 0 || isGlobalTarget(targetLower.c_str()) ||
-                targetLower == groupLower || groupCommand == "todos" ||
+                targetLower == groupLower || targetLower == "grupo" ||
+                targetLower == "group" || groupCommand == "todos" ||
                 groupCommand == "all" || groupCommand == groupLower ||
                 (isGroupTopic && targetLower != clientLower);
-            performUpdate(commandNeedsStagger);
+            publishCommandStatus("update_firmware", "starting",
+                                 "Checking Manifest...");
+            publishFwStatus("received", "command");
+            if (!queueFirmwareUpdate(commandNeedsStagger)) {
+                publishCommandStatus("update_firmware", "busy",
+                                     "Update em andamento");
+                publishFwStatus("error", "OTA ja pendente");
+            }
         } else if (commandLower == "set_fw_host" ||
                    commandLower == "set_firmware_host") {
             String host = commandValue(doc, "value", "host");
@@ -1004,24 +1025,23 @@ bool IotFeagri::publishFwStatusDetail(const char* state, const String& message,
     doc["owner"] = _userId;
     doc["profile"] = currentProfile();
     doc["version"] = _fwVersion;
+    doc["mode"] = "mqtt";
+    doc["status"] = state;
     doc["state"] = state;
     doc["timestamp"] = getUnixTimeMs();
     if (message.length() > 0) doc["message"] = message;
-    if (progress >= 0) doc["progress"] = progress;
-    if (written >= 0) doc["written"] = written;
-    if (total >= 0) doc["total"] = total;
-    if (url.length() > 0) doc["url"] = url;
 
     String jsonStr;
     serializeJson(doc, jsonStr);
-    String legacyTopic = mqttTopicLegacyFirmwareStatus();
     String userTopic = mqttTopicUserFirmwareStatus();
-    Serial.printf("[MQTT PUB] %s\n", legacyTopic.c_str());
-    bool legacyOk = _mqttClient.publish(legacyTopic.c_str(), jsonStr.c_str());
+    if (progress >= 0 || written >= 0 || total >= 0 || url.length() > 0) {
+        Serial.printf("[OTA] detail state=%s progress=%d written=%d total=%d url=%s\n",
+                      state ? state : "", progress, written, total, url.c_str());
+    }
     Serial.printf("[MQTT PUB] %s\n", userTopic.c_str());
     bool userOk = _mqttClient.publish(userTopic.c_str(), jsonStr.c_str());
     _mqttClient.loop();
-    return legacyOk || userOk;
+    return userOk;
 }
 
 void IotFeagri::waitOtaStagger(const char* reason) {
@@ -1050,6 +1070,22 @@ void IotFeagri::waitOtaStagger(const char* reason) {
 
 bool IotFeagri::downloadFirmwareOnce(const String& fwUrl, const String& md5,
                                      const String& manifestVersion, String& err) {
+    if (Update.isRunning()) {
+        Update.abort();
+    }
+    if (md5.length() == 0) {
+        err = "Manifest sem MD5";
+        return false;
+    }
+    if (!Update.setMD5(md5.c_str())) {
+        err = "MD5 esperado invalido";
+        return false;
+    }
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+        err = "Update.begin antecipado falhou: " + String(Update.errorString());
+        return false;
+    }
+
     WiFiClient tcp;
     WiFiClientSecure tls;
     HTTPClient http;
@@ -1061,6 +1097,7 @@ bool IotFeagri::downloadFirmwareOnce(const String& fwUrl, const String& md5,
     if (!beginHttpRequest(http, fwUrl, tcp, tls, _firmwareCaCert,
                           _firmwareAllowInsecure)) {
         err = "HTTP begin firmware failed";
+        Update.abort();
         return false;
     }
 
@@ -1068,6 +1105,7 @@ bool IotFeagri::downloadFirmwareOnce(const String& fwUrl, const String& md5,
     if (httpCode != HTTP_CODE_OK) {
         err = "HTTP GET firmware failed: " + String(httpCode);
         http.end();
+        Update.abort();
         return false;
     }
 
@@ -1075,35 +1113,8 @@ bool IotFeagri::downloadFirmwareOnce(const String& fwUrl, const String& md5,
     if (len <= 0) {
         err = "Content-Length invalido";
         http.end();
-        return false;
-    }
-
-    if (Update.isRunning()) {
         Update.abort();
-    }
-    if (md5.length() > 0 && !Update.setMD5(md5.c_str())) {
-        err = "MD5 esperado invalido";
-        http.end();
         return false;
-    }
-    if (!Update.begin((size_t)len, U_FLASH)) {
-        String firstErr = Update.errorString();
-        Serial.printf("Update.begin(%d) failed: %s. Retrying with UPDATE_SIZE_UNKNOWN.\n",
-                      len, firstErr.c_str());
-        publishFwStatusDetail("begin_retry",
-                              "Update.begin(size) failed: " + firstErr,
-                              -1, 0, len, fwUrl);
-        Update.abort();
-        if (md5.length() > 0 && !Update.setMD5(md5.c_str())) {
-            err = "MD5 esperado invalido apos retry";
-            http.end();
-            return false;
-        }
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
-            err = "Update.begin fallback failed: " + String(Update.errorString());
-            http.end();
-            return false;
-        }
     }
 
     WiFiClient* stream = http.getStreamPtr();
@@ -1162,9 +1173,10 @@ bool IotFeagri::downloadFirmwareOnce(const String& fwUrl, const String& md5,
         return false;
     }
 
-    if (!Update.end()) {
+    if (!Update.end(true)) {
         err = "Update.end failed: " + String(Update.errorString());
         http.end();
+        Update.abort();
         return false;
     }
 
@@ -1208,12 +1220,11 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
         publishFwStatus("error", "OTA ja em andamento");
         return;
     }
+    _otaActive = true;
 
     if (commandNeedsStagger) {
         waitOtaStagger("coletivo");
     }
-
-    publishFwStatus("starting", "OTA Triggered via Dashboard");
 
     String host = _fwServer.length() > 0 ? _fwServer : _mqttBroker;
     String baseUrl = buildFirmwareBaseUrl(host, _useTls);
@@ -1271,6 +1282,7 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
 
     if (selected < 0) {
         publishFwStatus("error", lastErr.length() ? lastErr.c_str() : "HTTP GET Manifest failed");
+        _otaActive = false;
         return;
     }
 
@@ -1278,6 +1290,7 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
     DeserializationError jsonErr = deserializeJson(doc, payload);
     if (jsonErr) {
         publishFwStatus("error", "JSON manifest invalido");
+        _otaActive = false;
         return;
     }
 
@@ -1288,6 +1301,7 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
 
     if (manifestVersion.length() > 0 && manifestVersion == _fwVersion) {
         publishFwStatus("skipped", "Firmware version already installed");
+        _otaActive = false;
         return;
     }
 
@@ -1297,9 +1311,8 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
     }
     publishFwStatusDetail("starting", manifestMessage, -1, -1, -1,
                           manifestCandidates[selected]);
-    publishFwStatusDetail("ota_url", fwUrl, 0, 0, -1, fwUrl);
+    Serial.printf("[OTA] firmware_url=%s\n", fwUrl.c_str());
 
-    _otaActive = true;
     if (_mqttClient.connected()) {
         _mqttClient.disconnect();
     }
@@ -1311,6 +1324,32 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
         delay(200);
         ESP.restart();
     }
+}
+
+bool IotFeagri::queueFirmwareUpdate(bool commandNeedsStagger) {
+    if (_otaActive || _otaTaskHandle != nullptr) {
+        return false;
+    }
+
+    _otaTaskNeedsStagger = commandNeedsStagger;
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        IotFeagri::otaTaskEntry, "iotfeagri_ota", 16384, this, 1,
+        &_otaTaskHandle, 1);
+    if (ok != pdPASS) {
+        _otaTaskHandle = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void IotFeagri::otaTaskEntry(void* arg) {
+    IotFeagri* self = static_cast<IotFeagri*>(arg);
+    if (self != nullptr) {
+        const bool needsStagger = self->_otaTaskNeedsStagger;
+        self->performUpdate(needsStagger);
+        self->_otaTaskHandle = nullptr;
+    }
+    vTaskDelete(nullptr);
 }
 
 void IotFeagri::startPortal() {
@@ -1468,8 +1507,6 @@ void IotFeagri::handleRoot() {
     appendReadonlyTopic(p, "Heartbeat", mqttTopicHeartbeat());
     appendReadonlyTopic(p, "OTA comando por usuario", mqttTopicUserFirmwareCmd());
     appendReadonlyTopic(p, "OTA status por usuario", mqttTopicUserFirmwareStatus());
-    appendReadonlyTopic(p, "OTA comando legado", mqttTopicLegacyFirmwareCmd());
-    appendReadonlyTopic(p, "OTA status legado", mqttTopicLegacyFirmwareStatus());
 
     p += "<div class='section'>Seguranca do portal</div>";
     p += "<label>Novo usuario web</label><input name='web_user' type='text' value='" + _webUser + "'>";
@@ -1546,15 +1583,14 @@ void IotFeagri::handleWebOtaUpload() {
         _webOtaError = "";
         _webOtaWritten = 0;
         _otaActive = true;
-        if (_mqttClient.connected()) {
-            _mqttClient.disconnect();
-        }
+        publishFwStatus("web_ota_start", upload.filename.c_str());
         if (Update.isRunning()) {
             Update.abort();
         }
         if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
             _webOtaError = "Update.begin falhou: " + String(Update.errorString());
             Serial.println("[WEB_OTA] " + _webOtaError);
+            publishFwStatus("web_ota_fail", _webOtaError.c_str());
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
         if (_webOtaError.length() > 0) {
@@ -1564,6 +1600,7 @@ void IotFeagri::handleWebOtaUpload() {
         if (written != upload.currentSize) {
             _webOtaError = "Update.write falhou: " + String(Update.errorString());
             Serial.println("[WEB_OTA] " + _webOtaError);
+            publishFwStatus("web_ota_fail", _webOtaError.c_str());
             return;
         }
         _webOtaWritten += written;
@@ -1578,15 +1615,18 @@ void IotFeagri::handleWebOtaUpload() {
         if (_webOtaError.length() > 0) {
             Update.abort();
             Serial.println("[WEB_OTA] " + _webOtaError);
+            publishFwStatus("web_ota_fail", _webOtaError.c_str());
         } else {
             Serial.printf("[WEB_OTA] Concluido: %u bytes\n",
                           (unsigned)_webOtaWritten);
+            publishFwStatus("web_ota_end", String(_webOtaWritten).c_str());
         }
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
         _webOtaError = "Upload abortado";
         Update.abort();
         _otaActive = false;
         Serial.println("[WEB_OTA] Upload abortado");
+        publishFwStatus("web_ota_abort", _webOtaError.c_str());
     }
 }
 
@@ -1602,6 +1642,8 @@ void IotFeagri::handleWebOtaDone() {
     String body = ok ? "OTA OK. Reiniciando..." : "OTA falhou: " + _webOtaError;
     _portalServer->send(ok ? 200 : 500, "text/plain", body);
     _otaActive = false;
+    publishFwStatus(ok ? "web_ota_ok" : "web_ota_fail",
+                    ok ? "Upload concluido" : _webOtaError.c_str());
     if (ok) {
         delay(500);
         ESP.restart();
