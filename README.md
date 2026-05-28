@@ -153,6 +153,75 @@ Padrao dos topicos:
 - Status/ACK: `feagri/<user>/devices/<client_id>/status`
 - Heartbeat: `feagri/<user>/devices/<client_id>/heartbeat`
 
+### RULE_CONFIG e RULE_COMMAND
+
+A biblioteca tambem fornece helpers para o contrato padronizado de regras locais. Ela nao executa regras por conta propria; o firmware do projeto continua responsavel por persistir `RULE_CONFIG`, manter o runtime e executar a acao local fora do callback MQTT.
+
+Topicos padrao:
+- `RULE_CONFIG`: `feagri/<user>/devices/<client_id>/config/rules`
+- `RULE_COMMAND`: `feagri/<user>/devices/<client_id>/config/rules/cmd`
+- Pedido legado/status: `feagri/<user>/devices/<client_id>/config/rules/request`
+- `RULE_ACK`: `feagri/<user>/devices/<client_id>/config/rules/ack`
+- `RULE_STATUS` e `RULE_EVENT`: `feagri/<user>/devices/<client_id>/config/rules/status`
+
+Retain:
+- `RULE_CONFIG` pode ser publicado com retain.
+- `RULE_COMMAND`, `RULE_ACK`, `RULE_STATUS` e `RULE_EVENT` devem ser publicados sem retain.
+
+Ciclo recomendado:
+- `RULE_CONFIG` carrega e salva a regra, mas nao inicia execucao.
+- `RULE_COMMAND start` inicia ou retoma a execucao local.
+- `RULE_COMMAND stop` para a execucao sem apagar a regra salva.
+- `RULE_COMMAND status` responde o estado atual, mesmo sem regra carregada.
+- Estados comuns: `empty`, `loaded`, `idle`, `running`, `stopped`, `completed`, `error`.
+- Eventos comuns: `loaded`, `started`, `stopped`, `completed`, `resumed`, `executed`, `error`.
+
+Payload minimo de `RULE_COMMAND`:
+
+```json
+{
+  "type": "RULE_COMMAND",
+  "schema_version": 1,
+  "command": "start",
+  "client_id": "leandro_exemploESP32_20F540",
+  "user_mqtt": "leandro",
+  "rule_id": "rule-001",
+  "revision": 3,
+  "request_id": "opcional"
+}
+```
+
+Helpers disponiveis:
+
+```cpp
+String base = IotFeagri::deviceBaseTopic(user, clientId);
+String cmdTopic = IotFeagri::rulesCommandTopic(user, clientId);
+
+RuleCommand cmd;
+RuleValidationResult result = IotFeagri::validateRuleCommandJson(
+    payload, clientId, userMqtt, cmd, activeRuleId, activeRevision);
+
+RuleAck ack;
+ack.clientId = clientId;
+ack.userMqtt = userMqtt;
+ack.command = cmd.command;
+ack.ruleId = cmd.ruleId;
+ack.revision = cmd.revision;
+ack.status = result.ok ? "accepted" : "error";
+ack.message = result.ok ? "RULE_COMMAND accepted" : result.error;
+String ackJson = IotFeagri::buildRuleAck(ack);
+```
+
+`validateRuleCommandJson()` valida:
+- `type == RULE_COMMAND`
+- `schema_version == 1`
+- `command` em `start`, `stop` ou `status`
+- `client_id` igual ao da placa, quando informado
+- `user_mqtt` igual ao usuario configurado, quando informado
+- `rule_id` e `revision` contra a regra ativa para `start`/`stop`, quando esses valores forem passados
+
+O callback MQTT deve apenas validar e agendar trabalho. Acionamento fisico, publish em cascata e qualquer operacao sensivel devem acontecer no `loop()`, task principal ou tick da rule engine.
+
 Na API atual, `publish("temperature", valor)` usa o nome informado como `<tipo_sensor>` e o proprio `client_id` como fallback de `<serial_ou_id>`.
 
 Para OTA MQTT, a biblioteca mantem compatibilidade com os topicos globais legados:

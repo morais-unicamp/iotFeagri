@@ -278,6 +278,246 @@ String IotFeagri::mqttTopicUserFirmwareStatus() const {
     return "feagri/" + _userId + "/firmware/update/status";
 }
 
+String IotFeagri::deviceBaseTopic(const String& user, const String& clientId) {
+    return "feagri/" + user + "/devices/" + clientId;
+}
+
+String IotFeagri::rulesConfigTopic(const String& user, const String& clientId) {
+    return deviceBaseTopic(user, clientId) + "/config/rules";
+}
+
+String IotFeagri::rulesCommandTopic(const String& user, const String& clientId) {
+    return rulesConfigTopic(user, clientId) + "/cmd";
+}
+
+String IotFeagri::rulesAckTopic(const String& user, const String& clientId) {
+    return rulesConfigTopic(user, clientId) + "/ack";
+}
+
+String IotFeagri::rulesStatusTopic(const String& user, const String& clientId) {
+    return rulesConfigTopic(user, clientId) + "/status";
+}
+
+String IotFeagri::rulesRequestTopic(const String& user, const String& clientId) {
+    return rulesConfigTopic(user, clientId) + "/request";
+}
+
+String IotFeagri::mqttTopicRulesConfig() const {
+    return rulesConfigTopic(_userId, _deviceId);
+}
+
+String IotFeagri::mqttTopicRulesCommand() const {
+    return rulesCommandTopic(_userId, _deviceId);
+}
+
+String IotFeagri::mqttTopicRulesAck() const {
+    return rulesAckTopic(_userId, _deviceId);
+}
+
+String IotFeagri::mqttTopicRulesStatus() const {
+    return rulesStatusTopic(_userId, _deviceId);
+}
+
+String IotFeagri::mqttTopicRulesRequest() const {
+    return rulesRequestTopic(_userId, _deviceId);
+}
+
+RuleValidationResult IotFeagri::validateClientId(const String& actual,
+                                                 const String& expected) {
+    if (expected.length() == 0 || actual == expected) {
+        return RuleValidationResult(true);
+    }
+    return RuleValidationResult(false, "client_id_mismatch",
+                                "client_id does not match this device");
+}
+
+RuleValidationResult IotFeagri::validateUserMqtt(const String& actual,
+                                                 const String& expected) {
+    if (expected.length() == 0 || actual.length() == 0 || actual == expected) {
+        return RuleValidationResult(true);
+    }
+    return RuleValidationResult(false, "user_mqtt_mismatch",
+                                "user_mqtt does not match configured user");
+}
+
+RuleValidationResult IotFeagri::validateRevision(int actual, int expected) {
+    if (expected < 0 || actual == expected) {
+        return RuleValidationResult(true);
+    }
+    return RuleValidationResult(false, "revision_mismatch",
+                                "revision does not match active rule");
+}
+
+RuleValidationResult IotFeagri::validateRuleCommandJson(
+    const String& payload, const String& expectedClientId,
+    const String& expectedUserMqtt, RuleCommand& out,
+    const String& activeRuleId, int activeRevision) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) {
+        return RuleValidationResult(false, "invalid_json", error.c_str());
+    }
+
+    if (strcmp(doc["type"] | "", "RULE_COMMAND") != 0) {
+        return RuleValidationResult(false, "invalid_type",
+                                    "type must be RULE_COMMAND");
+    }
+
+    if ((doc["schema_version"] | 0) != 1) {
+        return RuleValidationResult(false, "invalid_schema_version",
+                                    "schema_version must be 1");
+    }
+
+    String command = doc["command"] | "";
+    command.trim();
+    command.toLowerCase();
+    if (command != "start" && command != "stop" && command != "status") {
+        return RuleValidationResult(false, "invalid_command",
+                                    "command must be start, stop or status");
+    }
+
+    out = RuleCommand();
+    out.requestId = doc["request_id"] | "";
+    out.command = command;
+    out.clientId = doc["client_id"] | "";
+    out.userMqtt = doc["user_mqtt"] | "";
+    out.ruleId = doc["rule_id"] | "";
+    out.hasRevision = !doc["revision"].isNull();
+    out.revision = doc["revision"] | 0;
+
+    RuleValidationResult clientCheck =
+        validateClientId(out.clientId, expectedClientId);
+    if (!clientCheck.ok) {
+        return clientCheck;
+    }
+
+    RuleValidationResult userCheck =
+        validateUserMqtt(out.userMqtt, expectedUserMqtt);
+    if (!userCheck.ok) {
+        return userCheck;
+    }
+
+    if ((command == "start" || command == "stop") && activeRuleId.length() > 0 &&
+        out.ruleId.length() > 0 && out.ruleId != activeRuleId) {
+        return RuleValidationResult(false, "rule_id_mismatch",
+                                    "rule_id does not match active rule");
+    }
+
+    if ((command == "start" || command == "stop") && activeRevision >= 0) {
+        if (!out.hasRevision) {
+            return RuleValidationResult(false, "missing_revision",
+                                        "revision is required");
+        }
+        RuleValidationResult revisionCheck =
+            validateRevision(out.revision, activeRevision);
+        if (!revisionCheck.ok) {
+            return revisionCheck;
+        }
+    }
+
+    return RuleValidationResult(true);
+}
+
+RuleValidationResult IotFeagri::validateCommonRuleConfigFields(
+    const String& payload, const String& expectedClientId,
+    const String& expectedUserMqtt, String& ruleId, int& revision) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) {
+        return RuleValidationResult(false, "invalid_json", error.c_str());
+    }
+
+    if (strcmp(doc["type"] | "", "RULE_CONFIG") != 0) {
+        return RuleValidationResult(false, "invalid_type",
+                                    "type must be RULE_CONFIG");
+    }
+
+    if ((doc["schema_version"] | 0) != 1) {
+        return RuleValidationResult(false, "invalid_schema_version",
+                                    "schema_version must be 1");
+    }
+
+    ruleId = doc["rule_id"] | "";
+    revision = doc["revision"] | 0;
+    if (ruleId.length() == 0) {
+        return RuleValidationResult(false, "missing_rule_id",
+                                    "rule_id is required");
+    }
+
+    if (doc["revision"].isNull()) {
+        return RuleValidationResult(false, "missing_revision",
+                                    "revision is required");
+    }
+
+    RuleValidationResult clientCheck =
+        validateClientId(doc["client_id"] | "", expectedClientId);
+    if (!clientCheck.ok) {
+        return clientCheck;
+    }
+
+    RuleValidationResult userCheck =
+        validateUserMqtt(doc["user_mqtt"] | "", expectedUserMqtt);
+    if (!userCheck.ok) {
+        return userCheck;
+    }
+
+    return RuleValidationResult(true);
+}
+
+String IotFeagri::buildRuleAck(const RuleAck& ack) {
+    JsonDocument doc;
+    doc["type"] = "RULE_ACK";
+    doc["schema_version"] = 1;
+    doc["client_id"] = ack.clientId;
+    doc["user_mqtt"] = ack.userMqtt;
+    doc["command"] = ack.command;
+    doc["status"] = ack.status;
+    doc["timestamp"] = millis();
+    if (ack.requestId.length() > 0) doc["request_id"] = ack.requestId;
+    if (ack.ruleId.length() > 0) doc["rule_id"] = ack.ruleId;
+    if (ack.revision >= 0) doc["revision"] = ack.revision;
+    if (ack.message.length() > 0) doc["message"] = ack.message;
+
+    String json;
+    serializeJson(doc, json);
+    return json;
+}
+
+String IotFeagri::buildRuleStatus(const RuleStatus& status) {
+    JsonDocument doc;
+    doc["type"] = "RULE_STATUS";
+    doc["schema_version"] = 1;
+    doc["client_id"] = status.clientId;
+    doc["user_mqtt"] = status.userMqtt;
+    doc["state"] = status.state;
+    doc["running"] = status.running;
+    doc["timestamp"] = millis();
+    if (status.ruleId.length() > 0) doc["rule_id"] = status.ruleId;
+    if (status.revision >= 0) doc["revision"] = status.revision;
+    if (status.message.length() > 0) doc["message"] = status.message;
+
+    String json;
+    serializeJson(doc, json);
+    return json;
+}
+
+String IotFeagri::buildRuleEvent(const RuleEvent& event) {
+    JsonDocument doc;
+    doc["type"] = "RULE_EVENT";
+    doc["schema_version"] = 1;
+    doc["client_id"] = event.clientId;
+    doc["user_mqtt"] = event.userMqtt;
+    doc["event"] = event.event;
+    doc["timestamp"] = millis();
+    if (event.ruleId.length() > 0) doc["rule_id"] = event.ruleId;
+    if (event.revision >= 0) doc["revision"] = event.revision;
+    if (event.message.length() > 0) doc["message"] = event.message;
+
+    String json;
+    serializeJson(doc, json);
+    return json;
+}
+
 void IotFeagri::setupIdentityAndTopics() {
     uint64_t chipId = ESP.getEfuseMac();
     char suffix[7];

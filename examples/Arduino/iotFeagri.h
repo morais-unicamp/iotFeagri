@@ -19,6 +19,64 @@
 
 typedef void (*CommandCallback)(String command, String target, JsonObject data);
 
+struct RuleValidationResult {
+    bool ok;
+    String error;
+    String message;
+
+    RuleValidationResult(bool valid = true, const String& err = "",
+                         const String& msg = "")
+        : ok(valid), error(err), message(msg) {}
+};
+
+struct RuleCommand {
+    String requestId;
+    String command;
+    String clientId;
+    String userMqtt;
+    String ruleId;
+    int revision;
+    bool hasRevision;
+
+    RuleCommand() : revision(0), hasRevision(false) {}
+};
+
+struct RuleAck {
+    String requestId;
+    String command;
+    String clientId;
+    String userMqtt;
+    String ruleId;
+    int revision;
+    String status;
+    String message;
+
+    RuleAck() : revision(-1) {}
+};
+
+struct RuleStatus {
+    String clientId;
+    String userMqtt;
+    String ruleId;
+    int revision;
+    String state;
+    String message;
+    bool running;
+
+    RuleStatus() : revision(-1), running(false) {}
+};
+
+struct RuleEvent {
+    String clientId;
+    String userMqtt;
+    String ruleId;
+    int revision;
+    String event;
+    String message;
+
+    RuleEvent() : revision(-1) {}
+};
+
 class IotFeagri {
 public:
     IotFeagri(const char* user_default = "");
@@ -54,6 +112,38 @@ public:
     // Getters
     String getDeviceId() const { return _deviceId; }
     String getVersion() const { return _fwVersion; }
+    String getUserMqtt() const { return _userId; }
+
+    // Topicos padronizados RULE_CONFIG / RULE_COMMAND.
+    static String deviceBaseTopic(const String& user, const String& clientId);
+    static String rulesConfigTopic(const String& user, const String& clientId);
+    static String rulesCommandTopic(const String& user, const String& clientId);
+    static String rulesAckTopic(const String& user, const String& clientId);
+    static String rulesStatusTopic(const String& user, const String& clientId);
+    static String rulesRequestTopic(const String& user, const String& clientId);
+
+    String mqttTopicRulesConfig() const;
+    String mqttTopicRulesCommand() const;
+    String mqttTopicRulesAck() const;
+    String mqttTopicRulesStatus() const;
+    String mqttTopicRulesRequest() const;
+
+    // Validacao e builders comuns para firmwares com rule engine local.
+    static RuleValidationResult validateClientId(const String& actual,
+                                                 const String& expected);
+    static RuleValidationResult validateUserMqtt(const String& actual,
+                                                 const String& expected);
+    static RuleValidationResult validateRevision(int actual, int expected);
+    static RuleValidationResult validateRuleCommandJson(
+        const String& payload, const String& expectedClientId,
+        const String& expectedUserMqtt, RuleCommand& out,
+        const String& activeRuleId = "", int activeRevision = -1);
+    static RuleValidationResult validateCommonRuleConfigFields(
+        const String& payload, const String& expectedClientId,
+        const String& expectedUserMqtt, String& ruleId, int& revision);
+    static String buildRuleAck(const RuleAck& ack);
+    static String buildRuleStatus(const RuleStatus& status);
+    static String buildRuleEvent(const RuleEvent& event);
 
 private:
     String defaultProfile() const;
