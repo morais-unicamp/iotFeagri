@@ -113,6 +113,7 @@ public:
     String getDeviceId() const { return _deviceId; }
     String getVersion() const { return _fwVersion; }
     String getUserMqtt() const { return _userId; }
+    String getDataVisibility() const { return _dataVisibility; }
 
     // Topicos padronizados RULE_CONFIG / RULE_COMMAND.
     static String deviceBaseTopic(const String& user, const String& clientId);
@@ -154,6 +155,8 @@ private:
     String mqttTopicGroupCmd() const;
     String mqttTopicStatus() const;
     String mqttTopicData() const;
+    String mqttTopicPrivateData() const;
+    String mqttTopicPublicData() const;
     String mqttTopicData(const String& sensorType, const String& serialOrId) const;
     String mqttTopicHeartbeat() const;
     String mqttTopicLegacyFirmwareCmd() const;
@@ -178,6 +181,7 @@ private:
     
     String _deviceId;
     String _fwVersion;
+    String _dataVisibility;
     String _topicRtcReq;
     String _topicRtcResp;
 
@@ -220,6 +224,10 @@ private:
     void setupIdentityAndTopics();
     bool publishCommandStatus(const char* command, const char* status,
                               const String& message = "");
+    bool publishDataVisibilityAck(const char* status, const String& value,
+                                  const String& message = "");
+    bool saveDataVisibility();
+    bool setDataVisibility(const String& visibility);
     void resetConfig();
     void handleSerialInput();
     void processSerialCommand(String cmd);

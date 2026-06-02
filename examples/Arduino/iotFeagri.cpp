@@ -17,6 +17,7 @@
 #define KEY_FW_STATUS_MSG "fw_msg"
 #define KEY_WEB_USER "web_user"
 #define KEY_WEB_PASS "web_pass"
+#define KEY_DATA_VISIBILITY "data_visibility"
 
 static const char GLOBALSIGN_ROOT_CA_R3[] = R"EOF(
 -----BEGIN CERTIFICATE-----
@@ -175,6 +176,7 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _timeSynced = false;
     _mqttPort = 1883;
     _fwVersion = "v1.1.1";
+    _dataVisibility = "private";
     _portalActive = false;
     _portalServer = nullptr;
     _dnsServer = nullptr;
@@ -238,8 +240,19 @@ String IotFeagri::mqttTopicStatus() const {
     return mqttTopicDeviceBase() + "/status";
 }
 
-String IotFeagri::mqttTopicData() const {
+String IotFeagri::mqttTopicPrivateData() const {
     return mqttTopicDeviceBase() + "/data";
+}
+
+String IotFeagri::mqttTopicPublicData() const {
+    return "feagri/publico/users/" + _userId + "/devices/" + _deviceId + "/data";
+}
+
+String IotFeagri::mqttTopicData() const {
+    if (_dataVisibility == "public") {
+        return mqttTopicPublicData();
+    }
+    return mqttTopicPrivateData();
 }
 
 String IotFeagri::mqttTopicData(const String& sensorType, const String& serialOrId) const {
@@ -542,6 +555,9 @@ void IotFeagri::loadConfig() {
     _fwServer = prefs.getString(KEY_FW_SERVER, "");
     _useTls = prefs.getBool(KEY_TLS, false);
     _fwVersion = prefs.getString(KEY_FW_VERSION, _fwVersion);
+    String visibility = prefs.isKey(KEY_DATA_VISIBILITY)
+                            ? prefs.getString(KEY_DATA_VISIBILITY)
+                            : "";
     _webUser = prefs.isKey(KEY_WEB_USER) ? prefs.getString(KEY_WEB_USER) : "admin";
     _webPass = prefs.isKey(KEY_WEB_PASS) ? prefs.getString(KEY_WEB_PASS) : "admin";
     if (_webUser.length() == 0) {
@@ -551,6 +567,14 @@ void IotFeagri::loadConfig() {
         _webPass = "admin";
     }
     prefs.end();
+
+    visibility = lowerTrimmed(visibility);
+    if (visibility == "public" || visibility == "private") {
+        _dataVisibility = visibility;
+    } else {
+        _dataVisibility = "private";
+        saveDataVisibility();
+    }
 }
 
 void IotFeagri::saveConfig() {
@@ -567,7 +591,30 @@ void IotFeagri::saveConfig() {
     prefs.putBool(KEY_TLS, _useTls);
     prefs.putString(KEY_WEB_USER, _webUser);
     prefs.putString(KEY_WEB_PASS, _webPass);
+    prefs.putString(KEY_DATA_VISIBILITY, _dataVisibility);
     prefs.end();
+}
+
+bool IotFeagri::saveDataVisibility() {
+    Preferences prefs;
+    prefs.begin(PREF_NAME, false);
+    size_t written = prefs.putString(KEY_DATA_VISIBILITY, _dataVisibility);
+    prefs.end();
+    return written > 0;
+}
+
+bool IotFeagri::setDataVisibility(const String& visibility) {
+    String normalized = lowerTrimmed(visibility);
+    if (normalized != "private" && normalized != "public") {
+        return false;
+    }
+    String previous = _dataVisibility;
+    _dataVisibility = normalized;
+    if (saveDataVisibility()) {
+        return true;
+    }
+    _dataVisibility = previous;
+    return false;
 }
 
 void IotFeagri::saveFirmwareVersion() {
@@ -869,7 +916,7 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
         return;
     }
 
-    if (String(type) == "COMMAND") {
+    if (String(type) == "COMMAND" || String(type) == "CONFIG") {
         String command = cmd ? String(cmd) : "";
         String commandLower = lowerTrimmed(command);
         if (command == "UPDATE" || commandLower == "update_firmware" ||
@@ -918,6 +965,34 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
             } else {
                 publishFwStatus("error", "Firmware version empty");
             }
+        } else if (commandLower == "set_data_visibility") {
+            if (targetLower != clientLower) {
+                publishDataVisibilityAck("error", "", "target_id mismatch");
+                return;
+            }
+
+            String visibility = commandValue(doc, "value", "visibility");
+            visibility = lowerTrimmed(visibility);
+            if (visibility != "private" && visibility != "public") {
+                publishDataVisibilityAck("error", "", "invalid visibility");
+                return;
+            }
+
+            String publicTopic = commandValue(doc, "public_data_topic");
+            publicTopic.trim();
+            if (publicTopic.length() > 0 &&
+                !publicTopic.startsWith(mqttTopicPublicData())) {
+                publishDataVisibilityAck("error", visibility,
+                                         "invalid public_data_topic");
+                return;
+            }
+
+            if (setDataVisibility(visibility)) {
+                publishDataVisibilityAck("ok", _dataVisibility);
+            } else {
+                publishDataVisibilityAck("error", visibility,
+                                         "failed to persist visibility");
+            }
         } else if (commandLower == "reboot") {
             publishCommandStatus(command.c_str(), "ok", "rebooting");
             delay(200);
@@ -928,7 +1003,8 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
                              " mqtt=" +
                              String(_mqttClient.connected() ? "connected" : "disconnected") +
                              " heap=" + String(ESP.getFreeHeap()) +
-                             " ip=" + WiFi.localIP().toString();
+                             " ip=" + WiFi.localIP().toString() +
+                             " data_visibility=" + _dataVisibility;
             publishCommandStatus(command.c_str(), "ok", message);
         } else if (commandLower == "config") {
             String message = "mqtt_host=" + _mqttBroker +
@@ -936,7 +1012,8 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
                              " user=" + _userId +
                              " profile=" + currentProfile() +
                              " fw_version=" + _fwVersion +
-                             " fw_host=" + (_fwServer.length() ? _fwServer : "default");
+                             " fw_host=" + (_fwServer.length() ? _fwServer : "default") +
+                             " data_visibility=" + _dataVisibility;
             publishCommandStatus(command.c_str(), "ok", message);
         } else if (commandLower == "open_portal") {
             startPortal();
@@ -1042,6 +1119,7 @@ void IotFeagri::processSerialCommand(String cmd) {
         Serial.printf("MAC: %s\n", WiFi.macAddress().c_str());
         Serial.printf("Client ID: %s\n", _deviceId.c_str());
         Serial.printf("Group: %s\n", currentGroup().c_str());
+        Serial.printf("Data Visibility: %s\n", _dataVisibility.c_str());
         Serial.printf("Portal: %s\n", _portalServer ? "ACTIVE" : "INACTIVE");
         Serial.println("--- Topicos ---");
         Serial.printf("Data: %s\n", mqttTopicData("temperature", _deviceId).c_str());
@@ -1056,6 +1134,7 @@ void IotFeagri::processSerialCommand(String cmd) {
         Serial.printf("MQTT User: %s\n", _mqttUser.c_str());
         Serial.printf("Owner/User: %s\n", _userId.c_str());
         Serial.printf("Profile: %s\n", currentProfile().c_str());
+        Serial.printf("Data Visibility: %s\n", _dataVisibility.c_str());
         Serial.printf("FW Version: %s\n", _fwVersion.c_str());
         Serial.printf("FW Host: %s\n", _fwServer.length() > 0
                                            ? _fwServer.c_str()
@@ -1173,6 +1252,35 @@ bool IotFeagri::publishCommandStatus(const char* command, const char* status,
     doc["command"] = command;
     doc["status"] = status;
     doc["timestamp"] = getUnixTimeMs();
+    if (message.length() > 0) {
+        doc["message"] = message;
+    }
+
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+    String topic = mqttTopicStatus();
+    Serial.printf("[MQTT PUB] %s\n", topic.c_str());
+    return _mqttClient.publish(topic.c_str(), jsonStr.c_str());
+}
+
+bool IotFeagri::publishDataVisibilityAck(const char* status, const String& value,
+                                         const String& message) {
+    if (!_mqttClient.connected()) return false;
+
+    JsonDocument doc;
+    doc["type"] = "ACK";
+    doc["target_id"] = _deviceId;
+    doc["client_id"] = _deviceId;
+    doc["group"] = currentGroup();
+    doc["owner"] = _userId;
+    doc["profile"] = currentProfile();
+    doc["ref_command"] = "set_data_visibility";
+    doc["status"] = status;
+    doc["timestamp"] = getUnixTimeMs();
+    if (value.length() > 0) {
+        doc["value"] = value;
+        doc["data_topic"] = mqttTopicData();
+    }
     if (message.length() > 0) {
         doc["message"] = message;
     }
