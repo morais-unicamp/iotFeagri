@@ -168,6 +168,11 @@ Retain:
 - `RULE_CONFIG` pode ser publicado com retain.
 - `RULE_COMMAND`, `RULE_ACK`, `RULE_STATUS` e `RULE_EVENT` devem ser publicados sem retain.
 
+Contrato de conflito de revisao:
+- Quando `RULE_CONFIG` for rejeitado por `stale rule revision` ou `same revision with different content`, o `RULE_ACK` de erro deve incluir a regra atualmente carregada no dispositivo.
+- Campos esperados: `current_rule_id`, `current_revision` e `current_processor_type`.
+- A dashboard usa `current_revision + 1` para republicar a proxima revisao sem tentativas incrementais longas.
+
 Ciclo recomendado:
 - `RULE_CONFIG` carrega e salva a regra, mas nao inicia execucao.
 - `RULE_COMMAND start` inicia ou retoma a execucao local.

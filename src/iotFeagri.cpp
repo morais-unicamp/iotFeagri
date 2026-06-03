@@ -489,7 +489,12 @@ String IotFeagri::buildRuleAck(const RuleAck& ack) {
     if (ack.requestId.length() > 0) doc["request_id"] = ack.requestId;
     if (ack.ruleId.length() > 0) doc["rule_id"] = ack.ruleId;
     if (ack.revision >= 0) doc["revision"] = ack.revision;
+    if (ack.processorType.length() > 0) doc["processor_type"] = ack.processorType;
     if (ack.message.length() > 0) doc["message"] = ack.message;
+    if (ack.hasStored) doc["stored"] = ack.stored;
+    if (ack.currentRuleId.length() > 0) doc["current_rule_id"] = ack.currentRuleId;
+    if (ack.currentRevision >= 0) doc["current_revision"] = ack.currentRevision;
+    if (ack.currentProcessorType.length() > 0) doc["current_processor_type"] = ack.currentProcessorType;
 
     String json;
     serializeJson(doc, json);

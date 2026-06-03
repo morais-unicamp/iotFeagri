@@ -48,10 +48,16 @@ struct RuleAck {
     String userMqtt;
     String ruleId;
     int revision;
+    String processorType;
     String status;
     String message;
+    bool stored;
+    bool hasStored;
+    String currentRuleId;
+    int currentRevision;
+    String currentProcessorType;
 
-    RuleAck() : revision(-1) {}
+    RuleAck() : revision(-1), stored(false), hasStored(false), currentRevision(-1) {}
 };
 
 struct RuleStatus {
