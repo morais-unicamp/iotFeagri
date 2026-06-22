@@ -202,6 +202,7 @@ private:
     bool _otaActive;
     TaskHandle_t _otaTaskHandle;
     bool _otaTaskNeedsStagger;
+    bool _bootStatusPublished;
     String _webOtaError;
     size_t _webOtaWritten;
 
@@ -225,8 +226,11 @@ private:
     void saveConfig();
     void saveFirmwareVersion();
     void persistPendingFirmwareStatus(const String& version);
+    void persistWebOtaStatus(const char* state, const String& message);
     bool publishPendingFirmwareStatus();
+    bool publishWebOtaLastStatus();
     void clearPendingFirmwareStatus();
+    void clearWebOtaStatus();
     void setupIdentityAndTopics();
     bool publishCommandStatus(const char* command, const char* status,
                               const String& message = "");

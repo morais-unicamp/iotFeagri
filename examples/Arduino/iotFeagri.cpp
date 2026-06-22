@@ -15,6 +15,8 @@
 #define KEY_FW_VERSION "fw_ver"
 #define KEY_FW_STATUS_STATE "fw_state"
 #define KEY_FW_STATUS_MSG "fw_msg"
+#define KEY_WEB_OTA_STATE "web_ota_state"
+#define KEY_WEB_OTA_MSG "web_ota_msg"
 #define KEY_WEB_USER "web_user"
 #define KEY_WEB_PASS "web_pass"
 #define KEY_DATA_VISIBILITY "data_visibility"
@@ -62,6 +64,41 @@ String buildFirmwareBaseUrl(const String& host, bool useTls) {
 
 bool urlUsesTls(const String& url) {
     return url.startsWith("https://");
+}
+
+String httpFallbackUrl(const String& url) {
+    if (!url.startsWith("https://")) {
+        return "";
+    }
+    return "http://" + url.substring(strlen("https://"));
+}
+
+int compareFirmwareVersions(const String& a, const String& b) {
+    String left = a;
+    String right = b;
+    left.trim();
+    right.trim();
+    if (left.startsWith("v") || left.startsWith("V")) left.remove(0, 1);
+    if (right.startsWith("v") || right.startsWith("V")) right.remove(0, 1);
+
+    int li = 0;
+    int ri = 0;
+    while (li < left.length() || ri < right.length()) {
+        long lv = 0;
+        long rv = 0;
+        while (li < left.length() && left[li] != '.') {
+            if (isDigit(left[li])) lv = lv * 10 + (left[li] - '0');
+            ++li;
+        }
+        while (ri < right.length() && right[ri] != '.') {
+            if (isDigit(right[ri])) rv = rv * 10 + (right[ri] - '0');
+            ++ri;
+        }
+        if (lv != rv) return lv > rv ? 1 : -1;
+        if (li < left.length()) ++li;
+        if (ri < right.length()) ++ri;
+    }
+    return 0;
 }
 
 void configureSecureClient(WiFiClientSecure& client, const char* caCert, bool allowInsecure) {
@@ -189,6 +226,7 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _otaActive = false;
     _otaTaskHandle = nullptr;
     _otaTaskNeedsStagger = false;
+    _bootStatusPublished = false;
     _webOtaWritten = 0;
     _serialCliReady = false;
     _webUser = "admin";
@@ -630,16 +668,18 @@ void IotFeagri::saveFirmwareVersion() {
 }
 
 void IotFeagri::persistPendingFirmwareStatus(const String& version) {
-    String label = version;
-    label.trim();
-    if (!label.startsWith("v") && !label.startsWith("V")) {
-        label = "v" + label;
-    }
-
     Preferences prefs;
     prefs.begin(PREF_NAME, false);
     prefs.putString(KEY_FW_STATUS_STATE, "updated");
-    prefs.putString(KEY_FW_STATUS_MSG, "updated (" + label + ") " + version);
+    prefs.putString(KEY_FW_STATUS_MSG, version);
+    prefs.end();
+}
+
+void IotFeagri::persistWebOtaStatus(const char* state, const String& message) {
+    Preferences prefs;
+    prefs.begin(PREF_NAME, false);
+    prefs.putString(KEY_WEB_OTA_STATE, state ? state : "");
+    prefs.putString(KEY_WEB_OTA_MSG, message);
     prefs.end();
 }
 
@@ -664,11 +704,46 @@ bool IotFeagri::publishPendingFirmwareStatus() {
     return false;
 }
 
+bool IotFeagri::publishWebOtaLastStatus() {
+    Preferences prefs;
+    prefs.begin(PREF_NAME, true);
+    String state = prefs.isKey(KEY_WEB_OTA_STATE)
+                       ? prefs.getString(KEY_WEB_OTA_STATE)
+                       : "";
+    String message = prefs.isKey(KEY_WEB_OTA_MSG)
+                         ? prefs.getString(KEY_WEB_OTA_MSG)
+                         : "";
+    prefs.end();
+
+    if (state.length() == 0) {
+        return false;
+    }
+
+    String out = state;
+    if (message.length() > 0) {
+        out += " ";
+        out += message;
+    }
+    if (publishFwStatus("web_ota_last", out.c_str())) {
+        clearWebOtaStatus();
+        return true;
+    }
+    return false;
+}
+
 void IotFeagri::clearPendingFirmwareStatus() {
     Preferences prefs;
     prefs.begin(PREF_NAME, false);
     prefs.remove(KEY_FW_STATUS_STATE);
     prefs.remove(KEY_FW_STATUS_MSG);
+    prefs.end();
+}
+
+void IotFeagri::clearWebOtaStatus() {
+    Preferences prefs;
+    prefs.begin(PREF_NAME, false);
+    prefs.remove(KEY_WEB_OTA_STATE);
+    prefs.remove(KEY_WEB_OTA_MSG);
     prefs.end();
 }
 
@@ -792,8 +867,12 @@ bool IotFeagri::connectMQTT() {
         _mqttClient.subscribe(groupCmdTopic.c_str());
         _mqttClient.subscribe(userFwCmdTopic.c_str());
         _mqttClient.subscribe(_topicRtcResp.c_str());
-        publishPendingFirmwareStatus();
-        publishFwStatus("boot", "online");
+        if (!_bootStatusPublished) {
+            publishPendingFirmwareStatus();
+            publishFwStatus("boot", "online");
+            publishWebOtaLastStatus();
+            _bootStatusPublished = true;
+        }
         sendHeartbeat();
         _lastHeartbeatTime = millis();
         requestTimeSync();
@@ -1600,36 +1679,51 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
     const String fwCandidates[] = {defaultFwUrl, channelFwUrl, legacyFwUrl};
     String payload;
     int selected = -1;
+    bool selectedViaHttpFallback = false;
     String lastErr;
 
     for (int i = 0; i < 3 && selected < 0; ++i) {
-        publishFwStatusDetail("manifest_url", manifestCandidates[i], -1, -1, -1,
-                              manifestCandidates[i]);
-        for (int attempt = 1; attempt <= 3; ++attempt) {
-            WiFiClient tcp;
-            WiFiClientSecure tls;
-            HTTPClient http;
-            http.setConnectTimeout(8000);
-            http.setTimeout(15000);
-            http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-            http.setReuse(false);
-
-            if (!beginHttpRequest(http, manifestCandidates[i], tcp, tls,
-                                  _firmwareCaCert, _firmwareAllowInsecure)) {
-                lastErr = "HTTP begin manifest failed";
-                delay(500);
+        String activeManifestUrls[2] = {
+            manifestCandidates[i],
+            httpFallbackUrl(manifestCandidates[i])
+        };
+        for (int urlIndex = 0; urlIndex < 2 && selected < 0; ++urlIndex) {
+            if (activeManifestUrls[urlIndex].length() == 0) {
                 continue;
             }
-            int httpCode = http.GET();
-            if (httpCode == HTTP_CODE_OK) {
-                payload = http.getString();
-                selected = i;
-                http.end();
-                break;
+            if (urlIndex > 0) {
+                publishFwStatusDetail("manifest_fallback", activeManifestUrls[urlIndex],
+                                      -1, -1, -1, activeManifestUrls[urlIndex]);
             }
-            lastErr = "HTTP GET manifest failed: " + String(httpCode);
-            http.end();
-            delay(700);
+            publishFwStatusDetail("manifest_url", activeManifestUrls[urlIndex],
+                                  -1, -1, -1, activeManifestUrls[urlIndex]);
+            for (int attempt = 1; attempt <= 2; ++attempt) {
+                WiFiClient tcp;
+                WiFiClientSecure tls;
+                HTTPClient http;
+                http.setConnectTimeout(5000);
+                http.setTimeout(8000);
+                http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+                http.setReuse(false);
+
+                if (!beginHttpRequest(http, activeManifestUrls[urlIndex], tcp, tls,
+                                      _firmwareCaCert, _firmwareAllowInsecure)) {
+                    lastErr = "HTTP begin manifest failed";
+                    delay(300);
+                    continue;
+                }
+                int httpCode = http.GET();
+                if (httpCode == HTTP_CODE_OK) {
+                    payload = http.getString();
+                    selected = i;
+                    selectedViaHttpFallback = urlIndex > 0;
+                    http.end();
+                    break;
+                }
+                lastErr = "HTTP GET manifest failed: " + String(httpCode);
+                http.end();
+                delay(500);
+            }
         }
     }
 
@@ -1648,12 +1742,27 @@ void IotFeagri::performUpdate(bool commandNeedsStagger) {
     }
 
     String fwUrl = doc["url"] | fwCandidates[selected];
+    if (selectedViaHttpFallback && urlUsesTls(fwUrl)) {
+        String fallback = httpFallbackUrl(fwUrl);
+        if (fallback.length() > 0) {
+            fwUrl = fallback;
+            publishFwStatusDetail("ota_url_rewrite", fwUrl, -1, -1, -1, fwUrl);
+        }
+    }
+    if (urlUsesTls(fwUrl) && ESP.getMaxAllocHeap() < 60000) {
+        String fallback = httpFallbackUrl(fwUrl);
+        if (fallback.length() > 0) {
+            fwUrl = fallback;
+            publishFwStatusDetail("ota_url_rewrite", fwUrl, -1, -1, -1, fwUrl);
+        }
+    }
     String md5 = doc["md5"] | "";
     String manifestVersion = doc["version"] | "";
     manifestVersion.trim();
 
-    if (manifestVersion.length() > 0 && manifestVersion == _fwVersion) {
-        publishFwStatus("skipped", "Firmware version already installed");
+    if (manifestVersion.length() > 0 &&
+        compareFirmwareVersions(manifestVersion, _fwVersion) <= 0) {
+        publishFwStatus("skipped", "Firmware version already installed or not newer");
         _otaActive = false;
         return;
     }
@@ -1936,6 +2045,7 @@ void IotFeagri::handleWebOtaUpload() {
         _webOtaError = "";
         _webOtaWritten = 0;
         _otaActive = true;
+        persistWebOtaStatus("web_ota_start", upload.filename);
         publishFwStatus("web_ota_start", upload.filename.c_str());
         if (Update.isRunning()) {
             Update.abort();
@@ -1943,6 +2053,7 @@ void IotFeagri::handleWebOtaUpload() {
         if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
             _webOtaError = "Update.begin falhou: " + String(Update.errorString());
             Serial.println("[WEB_OTA] " + _webOtaError);
+            persistWebOtaStatus("web_ota_fail", _webOtaError);
             publishFwStatus("web_ota_fail", _webOtaError.c_str());
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
@@ -1953,6 +2064,7 @@ void IotFeagri::handleWebOtaUpload() {
         if (written != upload.currentSize) {
             _webOtaError = "Update.write falhou: " + String(Update.errorString());
             Serial.println("[WEB_OTA] " + _webOtaError);
+            persistWebOtaStatus("web_ota_fail", _webOtaError);
             publishFwStatus("web_ota_fail", _webOtaError.c_str());
             return;
         }
@@ -1968,10 +2080,12 @@ void IotFeagri::handleWebOtaUpload() {
         if (_webOtaError.length() > 0) {
             Update.abort();
             Serial.println("[WEB_OTA] " + _webOtaError);
+            persistWebOtaStatus("web_ota_fail", _webOtaError);
             publishFwStatus("web_ota_fail", _webOtaError.c_str());
         } else {
             Serial.printf("[WEB_OTA] Concluido: %u bytes\n",
                           (unsigned)_webOtaWritten);
+            persistWebOtaStatus("web_ota_end", String(_webOtaWritten));
             publishFwStatus("web_ota_end", String(_webOtaWritten).c_str());
         }
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
@@ -1979,6 +2093,7 @@ void IotFeagri::handleWebOtaUpload() {
         Update.abort();
         _otaActive = false;
         Serial.println("[WEB_OTA] Upload abortado");
+        persistWebOtaStatus("web_ota_abort", _webOtaError);
         publishFwStatus("web_ota_abort", _webOtaError.c_str());
     }
 }
@@ -1993,12 +2108,15 @@ void IotFeagri::handleWebOtaDone() {
     }
     bool ok = _webOtaError.length() == 0 && !Update.hasError();
     String body = ok ? "OTA OK. Reiniciando..." : "OTA falhou: " + _webOtaError;
+    const String finalMsg = ok ? String("Upload concluido") : _webOtaError;
+    persistWebOtaStatus(ok ? "web_ota_ok" : "web_ota_fail", finalMsg);
+    publishFwStatus(ok ? "web_ota_ok" : "web_ota_fail",
+                    finalMsg.c_str());
+    delay(300);
     _portalServer->send(ok ? 200 : 500, "text/plain", body);
     _otaActive = false;
-    publishFwStatus(ok ? "web_ota_ok" : "web_ota_fail",
-                    ok ? "Upload concluido" : _webOtaError.c_str());
     if (ok) {
-        delay(500);
+        delay(3000);
         ESP.restart();
     }
 }
