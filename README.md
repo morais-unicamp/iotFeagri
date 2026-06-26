@@ -149,9 +149,13 @@ Padrao dos topicos:
 - Base do dispositivo: `feagri/<user>/devices/<client_id>`
 - Comando individual: `feagri/<user>/devices/<client_id>/cmd`
 - Comando de grupo: `feagri/<user>/groups/<group>/cmd`
-- Dados de sensores: `feagri/<user>/devices/<client_id>/data/<tipo_sensor>/<serial_ou_id>`
+- Dados de sensores privados: `feagri/<user>/devices/<client_id>/data/<tipo_sensor>/<serial_ou_id>`
+- Dados de sensores publicos: `feagri/publico/users/<user>/devices/<client_id>/data/<tipo_sensor>/<serial_ou_id>`
+- Dados de sensores admin: `feagri/adm/devices/<client_id>/data/<tipo_sensor>/<serial_ou_id>`
 - Status/ACK: `feagri/<user>/devices/<client_id>/status`
 - Heartbeat: `feagri/<user>/devices/<client_id>/heartbeat`
+
+`data_visibility` aceita `private`, `public` ou `admin`. O padrao e `private`.
 
 ### RULE_CONFIG e RULE_COMMAND
 

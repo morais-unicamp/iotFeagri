@@ -163,6 +163,7 @@ private:
     String mqttTopicData() const;
     String mqttTopicPrivateData() const;
     String mqttTopicPublicData() const;
+    String mqttTopicAdminData() const;
     String mqttTopicData(const String& sensorType, const String& serialOrId) const;
     String mqttTopicHeartbeat() const;
     String mqttTopicLegacyFirmwareCmd() const;

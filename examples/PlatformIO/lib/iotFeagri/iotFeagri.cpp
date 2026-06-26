@@ -286,9 +286,16 @@ String IotFeagri::mqttTopicPublicData() const {
     return "feagri/publico/users/" + _userId + "/devices/" + _deviceId + "/data";
 }
 
+String IotFeagri::mqttTopicAdminData() const {
+    return "feagri/adm/devices/" + _deviceId + "/data";
+}
+
 String IotFeagri::mqttTopicData() const {
     if (_dataVisibility == "public") {
         return mqttTopicPublicData();
+    }
+    if (_dataVisibility == "admin") {
+        return mqttTopicAdminData();
     }
     return mqttTopicPrivateData();
 }
@@ -612,7 +619,7 @@ void IotFeagri::loadConfig() {
     prefs.end();
 
     visibility = lowerTrimmed(visibility);
-    if (visibility == "public" || visibility == "private") {
+    if (visibility == "public" || visibility == "private" || visibility == "admin") {
         _dataVisibility = visibility;
     } else {
         _dataVisibility = "private";
@@ -648,7 +655,7 @@ bool IotFeagri::saveDataVisibility() {
 
 bool IotFeagri::setDataVisibility(const String& visibility) {
     String normalized = lowerTrimmed(visibility);
-    if (normalized != "private" && normalized != "public") {
+    if (normalized != "private" && normalized != "public" && normalized != "admin") {
         return false;
     }
     String previous = _dataVisibility;
@@ -1057,7 +1064,7 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
 
             String visibility = commandValue(doc, "value", "visibility");
             visibility = lowerTrimmed(visibility);
-            if (visibility != "private" && visibility != "public") {
+            if (visibility != "private" && visibility != "public" && visibility != "admin") {
                 publishDataVisibilityAck("error", "", "invalid visibility");
                 return;
             }
@@ -1068,6 +1075,15 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
                 !publicTopic.startsWith(mqttTopicPublicData())) {
                 publishDataVisibilityAck("error", visibility,
                                          "invalid public_data_topic");
+                return;
+            }
+
+            String adminTopic = commandValue(doc, "admin_data_topic");
+            adminTopic.trim();
+            if (adminTopic.length() > 0 &&
+                !adminTopic.startsWith(mqttTopicAdminData())) {
+                publishDataVisibilityAck("error", visibility,
+                                         "invalid admin_data_topic");
                 return;
             }
 
@@ -1965,6 +1981,7 @@ void IotFeagri::handleRoot() {
     appendReadonlyTopic(p, "Comandos do dispositivo", mqttTopicCmd());
     appendReadonlyTopic(p, "Comandos do grupo", mqttTopicGroupCmd());
     appendReadonlyTopic(p, "Dados de sensores", mqttTopicData("temperature", _deviceId));
+    appendReadonlyTopic(p, "Dados admin", mqttTopicAdminData() + "/temperature/" + _deviceId);
     appendReadonlyTopic(p, "Status/ACK", mqttTopicStatus());
     appendReadonlyTopic(p, "Heartbeat", mqttTopicHeartbeat());
     appendReadonlyTopic(p, "OTA comando por usuario", mqttTopicUserFirmwareCmd());
