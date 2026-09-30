@@ -96,7 +96,7 @@ public:
     // Processa reconexões, MQTT, OTA e o Portal de Configuração
     void loop();
 
-    // Publica uma medição simples
+    // Publica uma medicao com epoch em ms capturado nesta chamada, se sincronizado.
     bool publish(const char* grandeur, float value);
     bool publish(const char* grandeur, int value);
     bool publish(const char* grandeur, String value);

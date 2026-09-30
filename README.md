@@ -61,7 +61,7 @@ O código básico para integrar seu sensor é muito simples:
 IotFeagri node;
 
 void setup() {
-  node.setFirmwareVersion("1.1.16"); // Versao da aplicacao, antes de begin()
+  node.setFirmwareVersion("1.1.17"); // Versao da aplicacao, antes de begin()
   node.begin(); // Inicializa WiFi, MQTT e Portal
 }
 
@@ -128,7 +128,7 @@ Payload:
   "group": "leandro_exemploESP32",
   "owner": "leandro",
   "profile": "exemploESP32",
-  "fw_version": "1.1.16",
+  "fw_version": "1.1.17",
   "ip": "192.168.1.100",
   "rssi": -55,
   "time_synced": true,
@@ -288,13 +288,55 @@ O callback MQTT deve apenas validar e agendar trabalho. Acionamento fisico, publ
 
 Na API atual, `publish("temperature", valor)` usa o nome informado como `<tipo_sensor>` e o proprio `client_id` como fallback de `<serial_ou_id>`.
 
+### Horario das medicoes (1.1.17)
+
+As chamadas `publish()` com valores `float`, `int` ou `String` incluem
+`time_synced` e, quando o relogio estiver valido, `timestamp` em Unix milissegundos
+na raiz de `MEASUREMENT`, usando o mesmo relogio dos heartbeats:
+
+```json
+{
+  "type": "MEASUREMENT",
+  "client_id": "leandro_exemploESP32_20F540",
+  "group": "leandro_exemploESP32",
+  "owner": "leandro",
+  "profile": "exemploESP32",
+  "time_synced": true,
+  "timestamp": 1790773127123,
+  "data": { "temperature": 24.5 }
+}
+```
+
+O horario e capturado durante `publish()`. No exemplo, a leitura simulada e
+gerada imediatamente antes dessa chamada. Se uma aplicacao armazenar leituras
+em uma fila antes de publica-las, esse campo representa a publicacao, nao o
+instante anterior da aquisicao. Essa API nao recebe um horario de coleta separado.
+
+Sem sincronizacao, a biblioteca continua publicando a medicao, informa
+`time_synced: false` e omite `timestamp`; nunca substitui epoch por uptime.
+Nesse caso, o backend usa seu horario de gravacao. Com `timestamp` valido,
+o backend local usa o horario informado pela placa para o registro no InfluxDB.
+
+Na validacao em bancada, capture tres mensagens de temperatura apos sincronizar:
+confira `time_synced: true`, epoch em ms e intervalos proximos de 30 segundos.
+Compare o `timestamp` do payload com o horario do ponto no historico e com a
+recepcao MQTT. Repita com o relogio indisponivel para verificar a omissao do campo.
+Amostras anteriores sem timestamp nao permitem recuperar o horario da placa.
+
+Historico desta correcao:
+- **1.1.16:** corrigiu a sincronizacao MQTT/RTC e os heartbeats. A placa foi
+  atualizada e o monitoramento relatou horario estavel, mas `MEASUREMENT` ainda
+  nao continha timestamp.
+- **1.1.17:** acrescenta o horario nas medicoes e mantem o contrato dos heartbeats.
+  A irregularidade de entrega relatada nao foi atribuida a perda de amostras.
+
 Para OTA MQTT, a biblioteca assina comandos e publica status nos topicos por usuario:
 - `feagri/<user>/firmware/update/cmd`
 - `feagri/<user>/firmware/update/status`
 
 ### Upload pela dashboard
 
-Os exemplos Arduino e PlatformIO declaram a versao **1.1.16** em
+Os exemplos Arduino e PlatformIO declaram a versao **1.1.17** em
 `firmware_version.h` e chamam `setFirmwareVersion()` antes de `begin()`.
 A versao declarada no codigo tem prioridade sobre a NVS desde o primeiro
 heartbeat, inclusive apos upload USB ou Web OTA. A versao da aplicacao e
@@ -338,7 +380,7 @@ No exemplo PlatformIO, o usuario padrao do script e `leandro`. Para gerar outro 
   `https://leandro144.feagri.unicamp.br/static/firmware`.
 
 Para a placa `leandro_exemploESP32_20F540`, use o binario
-`.pio/build/esp32dev/leandro_exemploESP32.bin` e informe **1.1.16** no campo
+`.pio/build/esp32dev/leandro_exemploESP32.bin` e informe **1.1.17** no campo
 `Versao` da dashboard. O upload nao modifica a versao embutida no binario.
 Confira se o manifest criado pela dashboard corresponde ao
 `leandro_exemploESP32.manifest.json` local (versao, grupo e MD5).
@@ -380,7 +422,7 @@ Esse fluxo usa `Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)`, valida os bytes esc
 
 Use Web OTA para testes locais e recuperacao rapida de placas em bancada. Para atualizacoes coordenadas de frota, prefira o fluxo OTA via dashboard/MQTT.
 
-Depois de instalar a release 1.1.16, confira `fw_version: "1.1.16"` no primeiro
+Depois de instalar a release 1.1.17, confira `fw_version: "1.1.17"` no primeiro
 heartbeat e nos seguintes. Uma NVS contendo 1.1.15 nao deve sobrescrever esse valor.
 Confirme tambem a sincronizacao de horario conforme o roteiro acima. Recompile
 sempre depois de alterar a versao; renomear o arquivo nao altera seu conteudo.

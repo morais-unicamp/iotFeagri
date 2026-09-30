@@ -45,7 +45,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
                 build, binary = self.build_artifacts(Path(directory), target)
                 manifest = json.loads((build / f"{group}.manifest.json").read_text())
                 self.assertEqual(manifest, {
-                    "version": "1.1.16", "group": group,
+                    "version": "1.1.17", "group": group,
                     "md5": hashlib.md5(binary).hexdigest(),
                     "url": f"https://leandro144.feagri.unicamp.br/static/firmware/{group}/firmware.bin",
                 })

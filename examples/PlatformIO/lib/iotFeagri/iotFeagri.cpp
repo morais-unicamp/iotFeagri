@@ -1300,6 +1300,9 @@ bool IotFeagri::publish(const char* grandeur, float value) {
     doc["group"] = currentGroup();
     doc["owner"] = _userId;
     doc["profile"] = currentProfile();
+    const uint64_t timestamp = getUnixTimeMs();
+    doc["time_synced"] = timestamp != 0;
+    if (timestamp != 0) doc["timestamp"] = timestamp;
     JsonObject data = doc["data"].to<JsonObject>();
     data[grandeur] = value;
 
@@ -1323,6 +1326,9 @@ bool IotFeagri::publish(const char* grandeur, String value) {
     doc["group"] = currentGroup();
     doc["owner"] = _userId;
     doc["profile"] = currentProfile();
+    const uint64_t timestamp = getUnixTimeMs();
+    doc["time_synced"] = timestamp != 0;
+    if (timestamp != 0) doc["timestamp"] = timestamp;
     JsonObject data = doc["data"].to<JsonObject>();
     data[grandeur] = value;
 
