@@ -1,5 +1,12 @@
 #include "iotFeagri.h"
 #include <esp_system.h>
+#include <cmath>
+#include <limits>
+
+// Accept civil time from 2000 through 2099; never confuse boot time with epoch.
+static constexpr uint64_t MIN_UNIX_MS = 946684800000ULL;
+static constexpr uint64_t MAX_UNIX_MS = 4102444800000ULL;
+static constexpr unsigned long TIME_SYNC_RETRY_MS = 60000UL;
 
 // Namespace e Chaves NVS
 #define PREF_NAME "iot-feagri"
@@ -210,9 +217,10 @@ IotFeagri::IotFeagri(const char* user_default) : _userId(user_default), _mqttCli
     _wifiOfflineSince = 0;
     _lastMetricsTime = 0;
     _lastHeartbeatTime = 0;
-    _timeSynced = false;
+    _lastTimeSyncRequest = 0;
     _mqttPort = 1883;
     _fwVersion = "v1.1.1";
+    _fwVersionExplicit = false;
     _dataVisibility = "private";
     _portalActive = false;
     _portalServer = nullptr;
@@ -604,7 +612,9 @@ void IotFeagri::loadConfig() {
     _mqttPass = prefs.getString(KEY_MQTT_PASS, "");
     _fwServer = prefs.getString(KEY_FW_SERVER, "");
     _useTls = prefs.getBool(KEY_TLS, false);
-    _fwVersion = prefs.getString(KEY_FW_VERSION, _fwVersion);
+    if (!_fwVersionExplicit) {
+        _fwVersion = prefs.getString(KEY_FW_VERSION, _fwVersion);
+    }
     String visibility = prefs.isKey(KEY_DATA_VISIBILITY)
                             ? prefs.getString(KEY_DATA_VISIBILITY)
                             : "";
@@ -667,10 +677,10 @@ bool IotFeagri::setDataVisibility(const String& visibility) {
     return false;
 }
 
-void IotFeagri::saveFirmwareVersion() {
+void IotFeagri::saveFirmwareVersion(const String& version) {
     Preferences prefs;
     prefs.begin(PREF_NAME, false);
-    prefs.putString(KEY_FW_VERSION, _fwVersion);
+    prefs.putString(KEY_FW_VERSION, version);
     prefs.end();
 }
 
@@ -942,6 +952,10 @@ void IotFeagri::loop() {
         _mqttClient.loop();
 
         unsigned long now = millis();
+        if (getUnixTimeMs() == 0 &&
+            now - _lastTimeSyncRequest >= TIME_SYNC_RETRY_MS) {
+            requestTimeSync();
+        }
         if (now - _lastHeartbeatTime >= 10000) {
             _lastHeartbeatTime = now;
             sendHeartbeat();
@@ -961,19 +975,6 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
     if (error) return;
-
-    if (topicStr == _topicRtcResp) {
-        long long unixMs = doc["timestamp"] | 0;
-        if (unixMs > 0) {
-            struct timeval tv;
-            tv.tv_sec = unixMs / 1000ULL;
-            tv.tv_usec = (unixMs % 1000ULL) * 1000ULL;
-            settimeofday(&tv, NULL);
-            _timeSynced = true;
-            Serial.println(">> Hora sincronizada via RTC FEAGRI!");
-        }
-        return;
-    }
 
     const char* type = doc["type"];
     const char* cmd = doc["command"];
@@ -1007,10 +1008,28 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
         return;
     }
 
+    // Legacy RTC response: timestamp is explicitly Unix milliseconds.
+    // Apply the same owner/target checks as individual commands.
+    if (topicStr == _topicRtcResp && !doc["timestamp"].isNull()) {
+        bool ok = applyTimeSync(doc["timestamp"], true);
+        publishCommandStatus("set_timerstamp", ok ? "ok" : "error",
+                             ok ? "Clock synchronized via RTC" : "Invalid RTC timestamp");
+        return;
+    }
+    // The shared RTC topic is only a time source, not a general command topic.
+    if (topicStr == _topicRtcResp) {
+        String rtcCommand = lowerTrimmed(String(cmd ? cmd : ""));
+        if (rtcCommand != "set_timerstamp" && rtcCommand != "set_timestamp") return;
+    }
+
     if (String(type) == "COMMAND" || String(type) == "CONFIG") {
         String command = cmd ? String(cmd) : "";
         String commandLower = lowerTrimmed(command);
-        if (command == "UPDATE" || commandLower == "update_firmware" ||
+        if (commandLower == "set_timerstamp" || commandLower == "set_timestamp") {
+            bool ok = applyTimeSync(doc["value"]);
+            publishCommandStatus(command.c_str(), ok ? "ok" : "error",
+                                 ok ? "Clock synchronized" : "Invalid time or clock update failed");
+        } else if (command == "UPDATE" || commandLower == "update_firmware" ||
             commandLower == "update_fw" ||
             commandLower == "trigger_update") {
             String groupCommand = lowerTrimmed(String(group));
@@ -1049,9 +1068,11 @@ void IotFeagri::handleMqttMessage(char* topic, byte* payload, unsigned int lengt
                    commandLower == "set_fw_version") {
             String version = commandValue(doc, "value", "version");
             version.trim();
-            if (version.length() > 0) {
+            if (_fwVersionExplicit && version != _fwVersion) {
+                publishFwStatus("error", "Firmware version defined by running code");
+            } else if (version.length() > 0) {
                 _fwVersion = version;
-                saveFirmwareVersion();
+                saveFirmwareVersion(_fwVersion);
                 publishFwStatus("set_firmware_version", _fwVersion.c_str());
             } else {
                 publishFwStatus("error", "Firmware version empty");
@@ -1393,7 +1414,11 @@ bool IotFeagri::publishDataVisibilityAck(const char* status, const String& value
 }
 
 void IotFeagri::setFirmwareVersion(const char* version) {
-    _fwVersion = version;
+    String compiledVersion = version ? version : "";
+    compiledVersion.trim();
+    if (compiledVersion.length() == 0) return;
+    _fwVersion = compiledVersion;
+    _fwVersionExplicit = true;
 }
 
 void IotFeagri::setMqttCaCert(const char* caCert) {
@@ -1430,7 +1455,9 @@ void IotFeagri::sendHeartbeat() {
     doc["fw_version"] = _fwVersion;
     doc["ip"] = WiFi.localIP().toString();
     doc["rssi"] = WiFi.RSSI();
-    doc["timestamp"] = getUnixTimeMs();
+    const uint64_t timestamp = getUnixTimeMs();
+    doc["time_synced"] = timestamp != 0;
+    if (timestamp != 0) doc["timestamp"] = timestamp;
     doc["uptime_ms"] = (unsigned long long)millis();
 
     String payload;
@@ -1440,10 +1467,13 @@ void IotFeagri::sendHeartbeat() {
 }
 
 void IotFeagri::requestTimeSync() {
+    _lastTimeSyncRequest = millis();
     JsonDocument doc;
     doc["type"] = "COMMAND";
     doc["command"] = "get_time";
     doc["client_id"] = _deviceId;
+    doc["target_id"] = "todos";
+    doc["sender_user"] = _userId;
 
     String out;
     serializeJson(doc, out);
@@ -1451,10 +1481,37 @@ void IotFeagri::requestTimeSync() {
     _mqttClient.publish(_topicRtcReq.c_str(), out.c_str());
 }
 
+bool IotFeagri::applyTimeSync(JsonVariantConst value, bool millisecondsOnly) {
+    // Read as double, not `variant | 0` (which selects a 32-bit int).
+    // Integer milliseconds in this range are exactly representable as double.
+    if (!value.is<double>()) return false;
+    double unixMs = value.as<double>();
+    if (!std::isfinite(unixMs)) return false;
+    if (!millisecondsOnly && unixMs >= MIN_UNIX_MS / 1000ULL &&
+        unixMs < MAX_UNIX_MS / 1000ULL) {
+        unixMs *= 1000.0;
+    }
+    if (unixMs < MIN_UNIX_MS || unixMs >= MAX_UNIX_MS) return false;
+
+    const uint64_t timestamp = static_cast<uint64_t>(unixMs);
+    const uint64_t seconds = timestamp / 1000ULL;
+    if (seconds > static_cast<uint64_t>(std::numeric_limits<time_t>::max())) {
+        return false;
+    }
+    struct timeval tv;
+    tv.tv_sec = static_cast<time_t>(seconds);
+    tv.tv_usec = (timestamp % 1000ULL) * 1000ULL;
+    if (settimeofday(&tv, nullptr) != 0) return false;
+    Serial.println(">> Hora sincronizada via MQTT!");
+    return true;
+}
+
 uint64_t IotFeagri::getUnixTimeMs() {
     struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000ULL);
+    if (gettimeofday(&tv, NULL) != 0 || tv.tv_sec < 0) return 0;
+    const uint64_t timestamp = (uint64_t)tv.tv_sec * 1000ULL +
+                               (uint64_t)(tv.tv_usec / 1000ULL);
+    return timestamp >= MIN_UNIX_MS && timestamp < MAX_UNIX_MS ? timestamp : 0;
 }
 
 bool IotFeagri::publishFwStatus(const char* state, const char* message) {
@@ -1632,8 +1689,8 @@ bool IotFeagri::downloadFirmwareOnce(const String& fwUrl, const String& md5,
     String versionToPersist = manifestVersion;
     versionToPersist.trim();
     if (versionToPersist.length() > 0) {
-        _fwVersion = versionToPersist;
-        saveFirmwareVersion();
+        saveFirmwareVersion(versionToPersist);
+        if (!_fwVersionExplicit) _fwVersion = versionToPersist;
     } else {
         versionToPersist = _fwVersion;
     }

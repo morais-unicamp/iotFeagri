@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <iotFeagri.h>
+#include "firmware_version.h"
 
 /*
  * Exemplo simples para aluno iniciante.
@@ -57,7 +58,7 @@ void setup() {
   applyLedState(false);
 
   // Inicializa a placa e tenta conectar. Se falhar, abre Portal 192.168.4.1.
-  node.setFirmwareVersion("v1.1.1_example");
+  node.setFirmwareVersion(IOTFEAGRI_EXAMPLE_FW_VERSION);
   node.begin();
 
   node.onCommand([](String command, String target, JsonObject data) {

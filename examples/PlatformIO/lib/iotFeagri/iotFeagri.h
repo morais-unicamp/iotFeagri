@@ -105,7 +105,7 @@ public:
     bool publishStatus(const char* key, String value);
     bool isOtaActive() const { return _otaActive; }
 
-    // Define a versão do firmware (importante para o OTA)
+    // Define a versao compilada antes de begin(); tem prioridade sobre a NVS.
     void setFirmwareVersion(const char* version);
     void setMqttCaCert(const char* caCert);
     void setFirmwareCaCert(const char* caCert);
@@ -188,6 +188,7 @@ private:
     
     String _deviceId;
     String _fwVersion;
+    bool _fwVersionExplicit;
     String _dataVisibility;
     String _topicRtcReq;
     String _topicRtcResp;
@@ -220,12 +221,12 @@ private:
     unsigned long _wifiOfflineSince;
     unsigned long _lastMetricsTime;
     unsigned long _lastHeartbeatTime;
-    bool _timeSynced;
+    unsigned long _lastTimeSyncRequest;
 
     // Persistência
     void loadConfig();
     void saveConfig();
-    void saveFirmwareVersion();
+    void saveFirmwareVersion(const String& version);
     void persistPendingFirmwareStatus(const String& version);
     void persistWebOtaStatus(const char* state, const String& message);
     bool publishPendingFirmwareStatus();
@@ -280,6 +281,7 @@ private:
     // Heartbeat & Time Sync
     void sendHeartbeat();
     void requestTimeSync();
+    bool applyTimeSync(JsonVariantConst value, bool millisecondsOnly = false);
     uint64_t getUnixTimeMs();
 };
 

@@ -10,6 +10,7 @@ libraries/
 
 # VS Code
 .vscode/
+__pycache__/
 
 # Binaries & Temporary files
 *.bin

@@ -5,6 +5,7 @@
  */
 
 #include "iotFeagri.h"
+#include "firmware_version.h"
 
 IotFeagri node;
 
@@ -53,8 +54,8 @@ void setup() {
   applyLedState(false);
 
   // Inicializa tudo. O Portal abrira se os dados estiverem faltando.
+  node.setFirmwareVersion(IOTFEAGRI_EXAMPLE_FW_VERSION);
   node.begin();
-  node.setFirmwareVersion("v1.1.1_Arduino");
 
   node.onCommand([](String command, String target, JsonObject data) {
     (void)target;
